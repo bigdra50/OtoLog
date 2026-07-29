@@ -9,7 +9,7 @@
 Mac から出る任意の音声をリアルタイム文字起こしして記録セッション（講演・会議など開始〜停止の単位）ごとに保存する、メニューバー常駐アプリ。
 録音・認識・保存はすべてオンデバイス（Apple SpeechAnalyzer）で完結し、クラウド送信はない。
 
-- キャプチャ: ScreenCaptureKit のシステム音声（BlackHole 等の仮想ドライバ不要、音声ルーティング無変更）
+- キャプチャ: CoreAudio Process Tap のシステム音声（BlackHole 等の仮想ドライバ不要、音声ルーティング無変更、画面収録権限も不要）
 - 認識: macOS 26 SpeechAnalyzer（日本語対応、volatile 結果によるライブ字幕付き）
 - 保存: セッションごとのディレクトリに transcript.md（人が読む用）+ transcript.jsonl（後処理用の生セグメント）+ meta.json
 
@@ -28,7 +28,7 @@ mise run install   # ビルド → ~/Applications/OtoLog.app へ配置 → 起�
 初回の使い方:
 
 1. メニューバーの耳アイコンをクリック → 「開始」
-2. 画面収録の許可ダイアログを許可する（システム音声キャプチャに必要）
+2. 「システム音声の録音」の許可ダイアログを許可する
 3. ポップオーバーの「アプリを再起動」を押す（許可直後のプロセスではキャプチャできないため）
 4. もう一度「開始」→ アイコンが波形アニメーションになり記録開始
 5. 「停止」でセッションが閉じ、保存先にセッションディレクトリができる
@@ -156,7 +156,7 @@ swift run otolog-devtool migrate-daily <dir>          # 旧日次形式をセッ
 
 ## 署名と TCC
 
-画面収録の許可は「バンドルID + コード署名」に紐づく。
+システム音声録音の許可（システム設定 > プライバシーとセキュリティ > 画面収録とシステム音声録音 の「System Audio Recording Only」）は「バンドルID + コード署名」に紐づく。画面そのものへのアクセス権は要求しない。
 既定の ad-hoc 署名はビルドごとにハッシュが変わり、**リビルドのたびに許可が剥がれる**。
 日常利用では自己署名証明書での署名を推奨:
 
@@ -164,7 +164,7 @@ swift run otolog-devtool migrate-daily <dir>          # 旧日次形式をセッ
 2. 名前 `OtoLog Dev`、種類「自己署名ルート」、証明書のタイプ「コード署名」
 3. `OTOLOG_CODESIGN_IDENTITY="OtoLog Dev" mise run install`
 
-許可が壊れた場合のリセット: `tccutil reset ScreenCapture com.bigdra50.OtoLog`
+許可が壊れた場合のリセット: `tccutil reset AudioCapture com.bigdra50.OtoLog`（旧版の画面収録エントリが残っている場合は `tccutil reset ScreenCapture com.bigdra50.OtoLog`）
 
 ## 配布
 
@@ -189,7 +189,7 @@ Cask 側で quarantine 属性を自動で外すため、追加操作なしで起
    xattr -dr com.apple.quarantine /Applications/OtoLog.app
    ```
 
-3. 起動し、初回に画面収録の許可を一度与える
+3. 起動し、初回にシステム音声録音の許可を一度与える
 
 ### リリースの作り方
 
@@ -208,7 +208,6 @@ Homebrew tap は別リポジトリ `bigdra50/homebrew-tap` に `Casks/otolog.rb`
 ## 既知の制約
 
 - ノッチのある MacBook でメニューバーが混んでいると、アイコンが OS によって非表示になる（本アプリに限らない挙動）。メニューバーの空きを作るか、[Ice](https://github.com/jordanbaird/Ice) 等の管理ツールを使う
-- ScreenCaptureKit を使うため、記録中はメニューバーに紫の収録インジケータが出る。「システム音声の録音のみ」権限（CoreAudio process tap）への移行は将来課題
 - 記録開始直後の約2秒は取りこぼす（モデルロードとキャプチャ起動のため）
 - 保存されるのはシステム音声のみ。マイク（自分の声）の同時記録は将来対応
 

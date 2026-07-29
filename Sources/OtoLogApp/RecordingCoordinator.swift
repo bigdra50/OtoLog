@@ -21,7 +21,7 @@ import OtoLogCore
     static func makeDefault(state: AppState, settings: AppSettings) -> RecordingCoordinator {
         let store = SessionFileStore(directory: settings.saveDirectory, timeZone: .current)
         let session = RecordingSession(
-            capture: SystemAudioCaptureSource(),
+            capture: ProcessTapCaptureSource(),
             engine: SpeechAnalyzerEngine(),
             store: store
         )

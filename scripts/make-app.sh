@@ -38,6 +38,7 @@ cat > "$APP/Contents/Info.plist" <<PLIST
 	<key>NSPrincipalClass</key><string>NSApplication</string>
 	<key>NSHighResolutionCapable</key><true/>
 	<key>NSDocumentsFolderUsageDescription</key><string>文字起こし結果を日次ファイルとして保存するために使用します。</string>
+	<key>NSAudioCaptureUsageDescription</key><string>システムで再生中の音声を文字起こしするために使用します。画面は取得しません。</string>
 </dict>
 </plist>
 PLIST
