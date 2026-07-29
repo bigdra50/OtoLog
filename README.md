@@ -1,5 +1,11 @@
 # OtoLog
 
+[![Release](https://img.shields.io/github/v/release/bigdra50/OtoLog?sort=semver)](https://github.com/bigdra50/OtoLog/releases/latest)
+[![Release workflow](https://github.com/bigdra50/OtoLog/actions/workflows/release.yml/badge.svg)](https://github.com/bigdra50/OtoLog/actions/workflows/release.yml)
+![macOS 26+](https://img.shields.io/badge/macOS-26%2B-black?logo=apple&logoColor=white)
+![Swift 6.2](https://img.shields.io/badge/Swift-6.2-fa7343?logo=swift&logoColor=white)
+[![Homebrew tap](https://img.shields.io/badge/brew-bigdra50%2Ftap%2Fotolog-informational?logo=homebrew&logoColor=white)](https://github.com/bigdra50/homebrew-tap)
+
 Mac から出る任意の音声をリアルタイム文字起こしして記録セッション（講演・会議など開始〜停止の単位）ごとに保存する、メニューバー常駐アプリ。
 録音・認識・保存はすべてオンデバイス（Apple SpeechAnalyzer）で完結し、クラウド送信はない。
 
