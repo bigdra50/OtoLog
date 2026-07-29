@@ -95,7 +95,7 @@ struct ClaudeCLIGeneratorTests {
 
             let debugLog = try ClaudeDebugLog(directory: dir, label: "gen")
             let generator = ClaudeCLIGenerator(
-                executableURL: script, arguments: ["--flag"], debugLog: debugLog
+                executableURL: script, arguments: ["--flag"], debugLogFactory: { debugLog }
             )
             let output = try await generator.generate(prompt: "プロンプト")
             #expect(output.contains("--debug-file"))
@@ -115,7 +115,7 @@ struct ClaudeCLIGeneratorTests {
             let generator = ClaudeCLIGenerator(
                 executableURL: URL(fileURLWithPath: "/bin/sh"),
                 arguments: ["-c", "printf '%s\\n' '{\"type\":\"result\",\"subtype\":\"success\",\"result\":\"ok\"}'"],
-                debugLog: debugLog
+                debugLogFactory: { debugLog }
             )
             let output = try await generator.generate(prompt: "x") { _ in }
             #expect(output == "ok")
@@ -123,6 +123,28 @@ struct ClaudeCLIGeneratorTests {
             let content = try String(contentsOf: debugLog.invocationLogURL, encoding: .utf8)
             #expect(content.contains("total="))
             #expect(content.contains("exit=0"))
+        }
+    }
+
+    /// ログは generate 呼び出しごとに1組作る。generator 使い回し（チャンク並列補正等）で
+    /// 複数呼び出しが同じファイルへ混ざった不具合の再発防止
+    @Test func createsFreshDebugLogPerGenerateCall() async throws {
+        try await withTempDir { dir in
+            let counter = PartialCollector()
+            let generator = ClaudeCLIGenerator(
+                executableURL: URL(fileURLWithPath: "/bin/sh"),
+                arguments: ["-c", "echo ok"],
+                debugLogFactory: {
+                    counter.append("called")
+                    return try? ClaudeDebugLog(directory: dir, label: "percall")
+                }
+            )
+            _ = try await generator.generate(prompt: "a")
+            _ = try await generator.generate(prompt: "b")
+            #expect(counter.values.count == 2)
+            let logs = try FileManager.default.contentsOfDirectory(atPath: dir.path)
+                .filter { $0.contains("percall") && !$0.contains("cli") }
+            #expect(logs.count == 2)
         }
     }
 

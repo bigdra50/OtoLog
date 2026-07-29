@@ -12,12 +12,14 @@ public struct ClaudeCLIGenerator: StreamingTextGenerator {
         executableURL: URL,
         arguments: [String] = ClaudeCLIGenerator.defaultArguments,
         timeout: Duration = .seconds(1800), // 補正は入力量に比例して長い。ハングはライブ表示で分かるため保険として長め
-        debugLog: ClaudeDebugLog? = ClaudeDebugLog.fromEnvironment() // 既定で環境変数駆動 = 全呼び出し経路が対象
+        // 既定で環境変数駆動 = 全呼び出し経路が対象。generate ごとに呼び、1呼び出し1ログ組を保つ
+        // （generator 使い回しの並列 generate が同じファイルへ混ざらないよう factory で受ける）
+        debugLogFactory: @escaping @Sendable () -> ClaudeDebugLog? = { ClaudeDebugLog.fromEnvironment() }
     ) {
         self.executableURL = executableURL
         self.arguments = arguments
         self.timeout = timeout
-        self.debugLog = debugLog
+        self.debugLogFactory = debugLogFactory
     }
 
     // MARK: Public
@@ -47,7 +49,8 @@ public struct ClaudeCLIGenerator: StreamingTextGenerator {
         let binDir = executableURL.deletingLastPathComponent().path
         environment["PATH"] = ((environment["PATH"].map { "\($0):" }) ?? "") + binDir
 
-        let runArguments = argumentsAddingDebugFile(to: arguments)
+        let debugLog = debugLogFactory()
+        let runArguments = Self.argumentsAddingDebugFile(to: arguments, debugLog: debugLog)
         debugLog?.logStart(arguments: runArguments, promptBytes: prompt.utf8.count)
         let result: CommandResult
         do {
@@ -104,7 +107,10 @@ public struct ClaudeCLIGenerator: StreamingTextGenerator {
         environment["PATH"] = ((environment["PATH"].map { "\($0):" }) ?? "") + binDir
 
         let parser = StreamEventParser(onPartial: onPartial)
-        let runArguments = argumentsAddingDebugFile(to: Self.streamingArguments(from: arguments))
+        let debugLog = debugLogFactory()
+        let runArguments = Self.argumentsAddingDebugFile(
+            to: Self.streamingArguments(from: arguments), debugLog: debugLog
+        )
         debugLog?.logStart(arguments: runArguments, promptBytes: prompt.utf8.count)
         let result: CommandResult
         do {
@@ -164,7 +170,7 @@ public struct ClaudeCLIGenerator: StreamingTextGenerator {
     private let executableURL: URL
     private let arguments: [String]
     private let timeout: Duration
-    private let debugLog: ClaudeDebugLog?
+    private let debugLogFactory: @Sendable () -> ClaudeDebugLog?
 
     /// stderr は診断用に末尾だけ保持する（未ログイン・context 超過などの本文は末尾に出る）
     private static func tail(of data: Data, maxCharacters: Int = 2000) -> String {
@@ -173,7 +179,7 @@ public struct ClaudeCLIGenerator: StreamingTextGenerator {
     }
 
     /// デバッグ有効時のみ --debug-file を足す（claude CLI 内部ログの取得。implicitly enables debug mode）
-    private func argumentsAddingDebugFile(to arguments: [String]) -> [String] {
+    private static func argumentsAddingDebugFile(to arguments: [String], debugLog: ClaudeDebugLog?) -> [String] {
         guard let debugLog else { return arguments }
         return arguments + ["--debug-file", debugLog.cliDebugLogURL.path]
     }
