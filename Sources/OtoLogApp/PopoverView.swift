@@ -126,15 +126,8 @@ struct PopoverView: View {
 
     private var footer: some View {
         VStack(alignment: .leading, spacing: 8) {
-            if !state.stewardFindings.isEmpty {
-                HStack {
-                    Text("未処理の記録が \(state.stewardFindings.count) 件あります")
-                        .font(.caption)
-                        .foregroundStyle(.orange)
-                    Spacer()
-                    Button("処理") { generation.processNextUnprocessed() }
-                        .font(.caption)
-                }
+            if !state.stewardFindings.isEmpty || state.pipelineRunning {
+                stewardRow
             }
             HStack {
                 Button("ライブラリ") { openLibrary() }
@@ -284,6 +277,40 @@ struct PopoverView: View {
                     .foregroundStyle(.red)
                     .lineLimit(3)
                 Button("再実行") { runSelectedGeneration() }
+            }
+        }
+    }
+
+    /// 生成セクションを開いていなくても処理の進捗・失敗が見えるよう、行内に状態を出す
+    private var stewardRow: some View {
+        HStack(spacing: 6) {
+            if case let .running(name) = state.generationState {
+                ProgressView()
+                    .controlSize(.mini)
+                Text("\(name) を実行中…")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            } else if state.pipelineRunning {
+                ProgressView()
+                    .controlSize(.mini)
+                Text("パイプラインを実行中…（詳細は「生成」）")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            } else if case let .failed(message) = state.generationState {
+                Text("処理に失敗: \(message)")
+                    .font(.caption)
+                    .foregroundStyle(.red)
+                    .lineLimit(2)
+                Spacer()
+                Button("再試行") { generation.processNextUnprocessed() }
+                    .font(.caption)
+            } else {
+                Text("未処理の記録が \(state.stewardFindings.count) 件あります")
+                    .font(.caption)
+                    .foregroundStyle(.orange)
+                Spacer()
+                Button("処理") { generation.processNextUnprocessed() }
+                    .font(.caption)
             }
         }
     }

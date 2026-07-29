@@ -43,6 +43,16 @@ struct LibraryView: View {
                     .foregroundStyle(.secondary)
             }
         }
+        .toolbar {
+            // タイトル生成のリネームや新しい記録を、ウィンドウを開いたまま反映する
+            ToolbarItem {
+                Button {
+                    reload()
+                } label: {
+                    Label("更新", systemImage: "arrow.clockwise")
+                }
+            }
+        }
         .onAppear(perform: reload)
     }
 

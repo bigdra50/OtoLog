@@ -44,6 +44,13 @@ public struct SessionSteward: Sendable {
                 || now.timeIntervalSince(meta.startedAt) >= staleThreshold
             guard isSettled else { return nil }
 
+            // 記録が空のセッション（誤開始の残骸など）は処理しても必ず失敗するので対象外
+            let transcript = saveDirectory
+                .appendingPathComponent(session.directoryName)
+                .appendingPathComponent("transcript.jsonl")
+            let size = ((try? FileManager.default.attributesOfItem(atPath: transcript.path))?[.size] as? Int) ?? 0
+            guard size > 0 else { return nil }
+
             let needsTitle = meta.title == nil
             let needsPipeline = meta.playbookID == nil
             guard needsTitle || needsPipeline else { return nil }
