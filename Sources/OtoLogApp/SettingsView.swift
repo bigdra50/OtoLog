@@ -18,14 +18,14 @@ struct SettingsView: View {
             }
             .pickerStyle(.menu)
 
-            HStack {
+            HStack(spacing: 4) {
                 Text("保存先")
                 Text(settings.saveDirectoryPath)
                     .foregroundStyle(.secondary)
                     .lineLimit(1)
                     .truncationMode(.middle)
                 Spacer()
-                Button("変更…") { chooseDirectory() }
+                IconButton(systemImage: "folder", label: "保存先を変更…") { chooseDirectory() }
             }
 
             HStack {
@@ -61,8 +61,7 @@ struct SettingsView: View {
             }
         }
         .font(.caption)
-        .padding(8)
-        .background(.quaternary.opacity(0.3), in: RoundedRectangle(cornerRadius: 6))
+        .panelBackground()
     }
 
     // MARK: Private

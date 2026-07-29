@@ -41,11 +41,13 @@ struct SessionDetailView: View {
                 } label: {
                     Label("Finder で開く", systemImage: "folder")
                 }
+                .help("Finder で開く")
                 Button {
                     NSWorkspace.shared.open(currentFileURL)
                 } label: {
                     Label("エディタで開く", systemImage: "square.and.pencil")
                 }
+                .help("エディタで開く")
             }
         }
         .onAppear(perform: reload)

@@ -52,8 +52,17 @@ struct PopoverView: View {
     private var statusSymbol: String {
         switch state.sessionState {
         case .recording: "waveform"
+        case .preparing: "arrow.down.circle"
         case .failed: "exclamationmark.triangle"
         default: "ear"
+        }
+    }
+
+    private var statusTint: AnyShapeStyle {
+        switch state.sessionState {
+        case .recording: AnyShapeStyle(.red)
+        case .failed: AnyShapeStyle(.orange)
+        default: AnyShapeStyle(.secondary)
         }
     }
 
@@ -62,14 +71,18 @@ struct PopoverView: View {
     }
 
     private var header: some View {
-        HStack {
-            Label(statusText, systemImage: statusSymbol)
-                .font(.headline)
-            Spacer()
-            Button(state.isRecording ? "停止" : "開始") {
-                coordinator.toggle()
-            }
-            .keyboardShortcut(.defaultAction)
+        HStack(spacing: 8) {
+            Image(systemName: statusSymbol)
+                .font(.system(size: 14, weight: .medium))
+                .foregroundStyle(statusTint)
+                .symbolEffect(.variableColor.iterative, isActive: state.isRecording)
+                .frame(width: 18)
+            Text(statusText)
+                .font(.system(.subheadline, weight: .semibold))
+                .foregroundStyle(state.isRecording ? AnyShapeStyle(.primary) : AnyShapeStyle(.secondary))
+            Spacer(minLength: 8)
+            RecordButton(isRecording: state.isRecording) { coordinator.toggle() }
+                .keyboardShortcut(.defaultAction)
         }
     }
 
@@ -85,10 +98,21 @@ struct PopoverView: View {
                 Text(message)
                     .font(.caption)
                     .foregroundStyle(.red)
-                HStack {
-                    Button("システム設定を開く") { coordinator.openScreenRecordingSettings() }
-                    Button("アプリを再起動") { coordinator.relaunchApp() }
+                // 復旧操作は頻度が低く取り違えの影響も大きいので、ここだけは文言を残す
+                HStack(spacing: 8) {
+                    Button {
+                        coordinator.openScreenRecordingSettings()
+                    } label: {
+                        Label("システム設定", systemImage: "gearshape")
+                    }
+                    Button {
+                        coordinator.relaunchApp()
+                    } label: {
+                        Label("再起動", systemImage: "arrow.clockwise")
+                    }
                 }
+                .buttonStyle(.bordered)
+                .controlSize(.small)
                 .font(.caption)
             }
         default:
@@ -116,7 +140,7 @@ struct PopoverView: View {
                 }
             }
             if let storeError = state.storeErrorMessage {
-                Text("保存エラー: \(storeError)")
+                Label("保存エラー: \(storeError)", systemImage: "exclamationmark.triangle")
                     .font(.caption2)
                     .foregroundStyle(.orange)
             }
@@ -125,32 +149,38 @@ struct PopoverView: View {
     }
 
     private var footer: some View {
-        VStack(alignment: .leading, spacing: 8) {
+        VStack(alignment: .leading, spacing: 10) {
             if !state.stewardFindings.isEmpty || state.pipelineRunning {
                 stewardRow
             }
-            HStack {
-                Button("ライブラリ") { openLibrary() }
-                Button("最新の記録を開く") { coordinator.openLatestSession() }
-                Spacer()
-                Button(showsGeneration ? "生成を閉じる" : "生成") {
-                    toggleGeneration()
-                }
-                Button(showsSettings ? "設定を閉じる" : "設定") {
-                    showsSettings.toggle()
-                }
-            }
-            .font(.caption)
+            toolbar
             if showsGeneration {
                 generationSection
             }
             if showsSettings {
                 SettingsView(settings: settings, coordinator: coordinator)
             }
-            HStack {
-                Spacer()
-                Button("OtoLog を終了") { NSApp.terminate(nil) }
-                    .font(.caption2)
+        }
+    }
+
+    private var toolbar: some View {
+        HStack(spacing: 2) {
+            IconButton(systemImage: "books.vertical", label: "ライブラリ") { openLibrary() }
+            IconButton(systemImage: "doc.text", label: "最新の記録を開く") { coordinator.openLatestSession() }
+            Spacer()
+            IconButton(
+                systemImage: "sparkles",
+                label: showsGeneration ? "生成を閉じる" : "生成",
+                isOn: showsGeneration
+            ) {
+                toggleGeneration()
+            }
+            IconButton(
+                systemImage: "gearshape",
+                label: showsSettings ? "設定を閉じる" : "設定",
+                isOn: showsSettings
+            ) {
+                showsSettings.toggle()
             }
         }
     }
@@ -196,15 +226,14 @@ struct PopoverView: View {
                 HStack(spacing: 6) {
                     TextField("トピック（任意）", text: $briefTopic)
                         .textFieldStyle(.roundedBorder)
-                    Button("事前ブリーフ") {
+                    IconButton(systemImage: "wand.and.stars", label: "事前ブリーフを作成", tone: .accent) {
                         generation.generateBrief(topic: briefTopic.isEmpty ? nil : briefTopic)
                     }
                 }
             }
         }
         .font(.caption)
-        .padding(8)
-        .background(.quaternary.opacity(0.3), in: RoundedRectangle(cornerRadius: 6))
+        .panelBackground()
         .onChange(of: state.generationSessions) { _, sessions in
             reconcileSelection(with: sessions)
         }
@@ -223,23 +252,23 @@ struct PopoverView: View {
                 }
             }
         }
-        if state.pipelineRunning {
-            HStack {
-                Spacer()
-                Button("キャンセル") { pipeline.cancel() }
-            }
-        } else {
-            HStack {
-                Button("プレイブックを実行") { runSelectedPlaybook(only: nil) }
-                    .disabled(state.isRecording || selectedSession == nil)
-                if state.pipelineTasks.contains(where: { $0.state.status == .failed }) {
-                    Button("失敗を再実行") { retryFailedTasks() }
-                }
-            }
-            if state.isRecording {
+        HStack(spacing: 2) {
+            if state.isRecording, !state.pipelineRunning {
                 Text("記録停止後に実行できます")
                     .font(.caption2)
                     .foregroundStyle(.orange)
+            }
+            Spacer()
+            if state.pipelineRunning {
+                IconButton(systemImage: "xmark", label: "実行をキャンセル", tone: .destructive) { pipeline.cancel() }
+            } else {
+                if state.pipelineTasks.contains(where: { $0.state.status == .failed }) {
+                    IconButton(systemImage: "arrow.clockwise", label: "失敗したタスクを再実行") { retryFailedTasks() }
+                }
+                IconButton(systemImage: "play.fill", label: "プレイブックを実行", tone: .accent) {
+                    runSelectedPlaybook(only: nil)
+                }
+                .disabled(state.isRecording || selectedSession == nil)
             }
         }
     }
@@ -247,36 +276,41 @@ struct PopoverView: View {
     @ViewBuilder private var generationControls: some View {
         switch state.generationState {
         case .idle:
-            HStack {
-                Button("生成を実行") { runSelectedGeneration() }
+            HStack(spacing: 2) {
+                Spacer()
                 if selectedSession?.title == nil {
-                    Button("タイトル生成") { runTitleAssignment() }
+                    IconButton(systemImage: "text.badge.plus", label: "タイトルを生成") { runTitleAssignment() }
                 }
+                IconButton(systemImage: "play.fill", label: "生成を実行", tone: .accent) { runSelectedGeneration() }
             }
         case let .running(templateName):
-            HStack {
+            HStack(spacing: 6) {
                 ProgressView()
                     .controlSize(.small)
                 Text("\(templateName) を生成中…")
+                    .foregroundStyle(.secondary)
                 Spacer()
-                Button("キャンセル") { generation.cancel() }
+                IconButton(systemImage: "xmark", label: "生成をキャンセル", tone: .destructive) { generation.cancel() }
             }
         case let .finished(url):
-            HStack {
+            HStack(spacing: 2) {
                 Label(url.lastPathComponent, systemImage: "checkmark.circle")
                     .foregroundStyle(.green)
                     .lineLimit(1)
                     .truncationMode(.middle)
                 Spacer()
-                Button("開く") { generation.openResult(url) }
-                Button("再実行") { runSelectedGeneration() }
+                IconButton(systemImage: "arrow.clockwise", label: "もう一度生成") { runSelectedGeneration() }
+                IconButton(systemImage: "arrow.up.forward.app", label: "生成物を開く", tone: .accent) {
+                    generation.openResult(url)
+                }
             }
         case let .failed(message):
-            VStack(alignment: .leading, spacing: 4) {
+            HStack(alignment: .top, spacing: 6) {
                 Text(message)
                     .foregroundStyle(.red)
                     .lineLimit(3)
-                Button("再実行") { runSelectedGeneration() }
+                Spacer()
+                IconButton(systemImage: "arrow.clockwise", label: "もう一度生成") { runSelectedGeneration() }
             }
         }
     }
@@ -288,31 +322,34 @@ struct PopoverView: View {
                 ProgressView()
                     .controlSize(.mini)
                 Text("\(name) を実行中…")
-                    .font(.caption)
                     .foregroundStyle(.secondary)
             } else if state.pipelineRunning {
                 ProgressView()
                     .controlSize(.mini)
                 Text("パイプラインを実行中…（詳細は「生成」）")
-                    .font(.caption)
                     .foregroundStyle(.secondary)
             } else if case let .failed(message) = state.generationState {
+                Image(systemName: "exclamationmark.triangle")
+                    .foregroundStyle(.red)
                 Text("処理に失敗: \(message)")
-                    .font(.caption)
                     .foregroundStyle(.red)
                     .lineLimit(2)
                 Spacer()
-                Button("再試行") { generation.processNextUnprocessed() }
-                    .font(.caption)
+                IconButton(systemImage: "arrow.clockwise", label: "処理を再試行") {
+                    generation.processNextUnprocessed()
+                }
             } else {
-                Text("未処理の記録が \(state.stewardFindings.count) 件あります")
-                    .font(.caption)
+                Image(systemName: "tray.full")
                     .foregroundStyle(.orange)
+                Text("未処理の記録 \(state.stewardFindings.count) 件")
+                    .foregroundStyle(.secondary)
                 Spacer()
-                Button("処理") { generation.processNextUnprocessed() }
-                    .font(.caption)
+                IconButton(systemImage: "play.fill", label: "未処理の記録を処理", tone: .accent) {
+                    generation.processNextUnprocessed()
+                }
             }
         }
+        .font(.caption)
     }
 
     private func pipelineTaskRow(_ task: PipelineTaskDisplay) -> some View {
