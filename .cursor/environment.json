@@ -1,0 +1,5 @@
+{
+  "name": "OtoLog",
+  "install": "bash scripts/cursor-cloud-install.sh",
+  "agentCanUpdateSnapshot": true
+}
