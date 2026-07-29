@@ -141,6 +141,8 @@ swift run otolog-devtool migrate-daily <dir>          # 旧日次形式をセッ
 ```
 
 - `OTOLOG_TRACE=1` でエンジン内部のトレースが stderr に出る
+- `OTOLOG_CLAUDE_DEBUG=1` で claude 呼び出しごとの診断ログを `$XDG_STATE_HOME/otolog/claude-logs/`（既定 `~/.local/state/...`）へ保存する。呼び出しタイムライン（`.log`: 引数・プロンプトサイズ・チャンク受信・終了/エラー）と claude CLI 内部ログ（`-cli.log`: API リクエスト・リトライ）の2ファイル1組。生成が進んでいるか・リトライで詰まっているかの切り分けに使う
+  - GUI アプリで有効化する場合は `launchctl setenv OTOLOG_CLAUDE_DEBUG 1` してからアプリを再起動（戻すときは `unsetenv`）
 - 構成: `OtoLogCore`（コントラクト + 実装、全ロジックのテストはここ）/ `OtoLogApp`（薄い UI 層、テストなし）
 - コントラクト（`Contracts/`）を境界に、キャプチャ源・エンジン・ストアは差し替え可能
 
