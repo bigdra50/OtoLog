@@ -119,12 +119,13 @@ if args[1] == "run-playbook" {
         saveDirectory: directory,
         timeZone: .current,
         generatorFactory: { task in
+            // timeout はここで上書きしない。ClaudeCLIGenerator の既定 1800s に一元化する
+            // （600s 明示指定が残りアプリ側の延長が効かなかった事故の再発防止）
             ClaudeCLIGenerator(
                 executableURL: executableURL,
                 arguments: ClaudeCLIGenerator.arguments(
                     model: task.model, allowWebResearch: task.allowsWebResearch
-                ),
-                timeout: task.allowsWebResearch ? .seconds(900) : .seconds(600)
+                )
             )
         }
     )

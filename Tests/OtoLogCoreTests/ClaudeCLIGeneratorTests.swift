@@ -86,6 +86,46 @@ struct ClaudeCLIGeneratorTests {
         #expect(collector.values.contains("本文A"))
     }
 
+    /// デバッグログ注入時は --debug-file が引数に足され、呼び出しタイムラインが残る
+    @Test func debugLogCapturesInvocationAndAddsDebugFileFlag() async throws {
+        try await withTempDir { dir in
+            let script = dir.appendingPathComponent("echo-args.sh")
+            try "#!/bin/sh\nprintf '%s ' \"$@\"\n".write(to: script, atomically: true, encoding: .utf8)
+            try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: script.path)
+
+            let debugLog = try ClaudeDebugLog(directory: dir, label: "gen")
+            let generator = ClaudeCLIGenerator(
+                executableURL: script, arguments: ["--flag"], debugLog: debugLog
+            )
+            let output = try await generator.generate(prompt: "プロンプト")
+            #expect(output.contains("--debug-file"))
+            #expect(output.contains(debugLog.cliDebugLogURL.path))
+
+            let content = try String(contentsOf: debugLog.invocationLogURL, encoding: .utf8)
+            #expect(content.contains("start"))
+            #expect(content.contains("prompt=\("プロンプト".utf8.count)"))
+            #expect(content.contains("exit=0"))
+        }
+    }
+
+    /// ストリーミング版でもデバッグログにチャンク受信が残る（進行の生存確認が目的）
+    @Test func streamingDebugLogRecordsChunks() async throws {
+        try await withTempDir { dir in
+            let debugLog = try ClaudeDebugLog(directory: dir, label: "stream")
+            let generator = ClaudeCLIGenerator(
+                executableURL: URL(fileURLWithPath: "/bin/sh"),
+                arguments: ["-c", "printf '%s\\n' '{\"type\":\"result\",\"subtype\":\"success\",\"result\":\"ok\"}'"],
+                debugLog: debugLog
+            )
+            let output = try await generator.generate(prompt: "x") { _ in }
+            #expect(output == "ok")
+
+            let content = try String(contentsOf: debugLog.invocationLogURL, encoding: .utf8)
+            #expect(content.contains("total="))
+            #expect(content.contains("exit=0"))
+        }
+    }
+
     /// GUI 起動時の PATH（/usr/bin:/bin のみ）対策と、プロジェクト設定を拾わない空 cwd の契約
     @Test func runsInEmptyTempDirWithExecutableDirOnPath() async throws {
         try await withTempDir { dir in

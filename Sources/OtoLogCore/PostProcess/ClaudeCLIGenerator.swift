@@ -11,11 +11,13 @@ public struct ClaudeCLIGenerator: StreamingTextGenerator {
     public init(
         executableURL: URL,
         arguments: [String] = ClaudeCLIGenerator.defaultArguments,
-        timeout: Duration = .seconds(1800) // 補正は入力量に比例して長い。ハングはライブ表示で分かるため保険として長め
+        timeout: Duration = .seconds(1800), // 補正は入力量に比例して長い。ハングはライブ表示で分かるため保険として長め
+        debugLog: ClaudeDebugLog? = ClaudeDebugLog.fromEnvironment() // 既定で環境変数駆動 = 全呼び出し経路が対象
     ) {
         self.executableURL = executableURL
         self.arguments = arguments
         self.timeout = timeout
+        self.debugLog = debugLog
     }
 
     // MARK: Public
@@ -45,13 +47,27 @@ public struct ClaudeCLIGenerator: StreamingTextGenerator {
         let binDir = executableURL.deletingLastPathComponent().path
         environment["PATH"] = ((environment["PATH"].map { "\($0):" }) ?? "") + binDir
 
-        let result = try await CommandRunner.run(
-            executable: executableURL,
-            arguments: arguments,
-            stdin: Data(prompt.utf8),
-            currentDirectoryURL: workDir,
-            environment: environment,
-            timeout: timeout
+        let runArguments = argumentsAddingDebugFile(to: arguments)
+        debugLog?.logStart(arguments: runArguments, promptBytes: prompt.utf8.count)
+        let result: CommandResult
+        do {
+            result = try await CommandRunner.run(
+                executable: executableURL,
+                arguments: runArguments,
+                stdin: Data(prompt.utf8),
+                currentDirectoryURL: workDir,
+                environment: environment,
+                timeout: timeout,
+                onStdoutChunk: { [debugLog] chunk in debugLog?.logChunk(bytes: chunk.count) }
+            )
+        } catch {
+            debugLog?.logError(error.localizedDescription)
+            throw error
+        }
+        debugLog?.logFinish(
+            terminationStatus: result.terminationStatus,
+            stdoutBytes: result.stdout.count,
+            stderrTail: Self.tail(of: result.stderr)
         )
 
         guard result.terminationStatus == 0 else {
@@ -88,14 +104,30 @@ public struct ClaudeCLIGenerator: StreamingTextGenerator {
         environment["PATH"] = ((environment["PATH"].map { "\($0):" }) ?? "") + binDir
 
         let parser = StreamEventParser(onPartial: onPartial)
-        let result = try await CommandRunner.run(
-            executable: executableURL,
-            arguments: Self.streamingArguments(from: arguments),
-            stdin: Data(prompt.utf8),
-            currentDirectoryURL: workDir,
-            environment: environment,
-            timeout: timeout,
-            onStdoutChunk: { parser.consume($0) }
+        let runArguments = argumentsAddingDebugFile(to: Self.streamingArguments(from: arguments))
+        debugLog?.logStart(arguments: runArguments, promptBytes: prompt.utf8.count)
+        let result: CommandResult
+        do {
+            result = try await CommandRunner.run(
+                executable: executableURL,
+                arguments: runArguments,
+                stdin: Data(prompt.utf8),
+                currentDirectoryURL: workDir,
+                environment: environment,
+                timeout: timeout,
+                onStdoutChunk: { [debugLog] chunk in
+                    parser.consume(chunk)
+                    debugLog?.logChunk(bytes: chunk.count)
+                }
+            )
+        } catch {
+            debugLog?.logError(error.localizedDescription)
+            throw error
+        }
+        debugLog?.logFinish(
+            terminationStatus: result.terminationStatus,
+            stdoutBytes: result.stdout.count,
+            stderrTail: Self.tail(of: result.stderr)
         )
 
         guard result.terminationStatus == 0 else {
@@ -132,11 +164,18 @@ public struct ClaudeCLIGenerator: StreamingTextGenerator {
     private let executableURL: URL
     private let arguments: [String]
     private let timeout: Duration
+    private let debugLog: ClaudeDebugLog?
 
     /// stderr は診断用に末尾だけ保持する（未ログイン・context 超過などの本文は末尾に出る）
     private static func tail(of data: Data, maxCharacters: Int = 2000) -> String {
         let text = String(decoding: data, as: UTF8.self).trimmingCharacters(in: .whitespacesAndNewlines)
         return String(text.suffix(maxCharacters))
+    }
+
+    /// デバッグ有効時のみ --debug-file を足す（claude CLI 内部ログの取得。implicitly enables debug mode）
+    private func argumentsAddingDebugFile(to arguments: [String]) -> [String] {
+        guard let debugLog else { return arguments }
+        return arguments + ["--debug-file", debugLog.cliDebugLogURL.path]
     }
 }
 
