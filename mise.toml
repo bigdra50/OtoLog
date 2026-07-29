@@ -1,0 +1,41 @@
+[tools]
+swiftformat = "latest"
+
+[tasks.build]
+run = "swift build"
+
+[tasks.test]
+description = "単体テスト + lint（TCC・ネットワーク不要）"
+run = ["swift test", "swiftformat Sources Tests --lint"]
+
+[tasks."test:integration"]
+description = "SpeechAnalyzer 統合テスト（初回はモデルDLあり）"
+run = "OTOLOG_INTEGRATION=1 swift test --filter Integration"
+
+[tasks."test:claude"]
+description = "実 claude -p の統合テスト（課金あり・要ログイン済み CLI）"
+run = "OTOLOG_CLAUDE_INTEGRATION=1 swift test --filter ClaudeCLIIntegration"
+
+[tasks."skill:install"]
+description = "otolog-generate スキルを ~/.claude/skills へ symlink（テンプレートを再書き出し）"
+run = [
+  "swift run otolog-devtool export-templates skills/otolog-generate/templates",
+  "mkdir -p ~/.claude/skills",
+  "ln -sfn \"$(pwd)/skills/otolog-generate\" ~/.claude/skills/otolog-generate",
+]
+
+[tasks.bundle]
+run = "scripts/make-app.sh"
+
+[tasks.run]
+depends = ["bundle"]
+run = "open dist/OtoLog.app"
+
+[tasks.install]
+depends = ["bundle"]
+run = "rm -rf ~/Applications/OtoLog.app && mkdir -p ~/Applications && cp -R dist/OtoLog.app ~/Applications/ && open ~/Applications/OtoLog.app"
+
+[tasks.dist]
+description = "配布用 zip を作る（ad-hoc 署名。受領側は初回に quarantine 除去が要る。README 参照）"
+depends = ["bundle"]
+run = "/usr/bin/ditto -c -k --keepParent dist/OtoLog.app dist/OtoLog.zip && echo 'created: dist/OtoLog.zip'"

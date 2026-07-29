@@ -1,0 +1,57 @@
+name: release
+
+# タグ push（v*）で配布用 zip をビルドし、GitHub Release に添付する。
+# 手動確認用に workflow_dispatch でもビルドできる（Release は作らず artifact のみ残す）。
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write # Release 作成に必要
+
+jobs:
+  build:
+    # macOS 26 SDK（SpeechAnalyzer 等）が要るため Xcode 26 が載るランナーを使う。
+    # macos-26 が使えない場合は runs-on を macos-15 にし、maxim-lobanov/setup-xcode で 26 系を指定する。
+    runs-on: macos-26
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # make-app.sh のビルド番号（git rev-list --count）に全履歴が要る
+
+      - name: Show toolchain
+        run: swift --version && xcodebuild -version
+
+      - name: Build & bundle（.app / ad-hoc 署名）
+        run: |
+          # タグ push のときだけ vX.Y.Z → X.Y.Z を VERSION に渡す
+          if [ "${GITHUB_REF_TYPE}" = "tag" ]; then
+            export OTOLOG_VERSION="${GITHUB_REF_NAME#v}"
+          fi
+          scripts/make-app.sh
+
+      - name: Package zip
+        run: /usr/bin/ditto -c -k --keepParent dist/OtoLog.app dist/OtoLog.zip
+
+      - name: Compute sha256
+        id: sha
+        run: echo "sha256=$(shasum -a 256 dist/OtoLog.zip | awk '{print $1}')" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: OtoLog-zip
+          path: dist/OtoLog.zip
+
+      - name: Create Release
+        if: github.ref_type == 'tag'
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/OtoLog.zip
+          generate_release_notes: true
+          body: |
+            ## Homebrew Cask 更新用
+            - version: `${{ github.ref_name }}`
+            - sha256: `${{ steps.sha.outputs.sha256 }}`
+
+            ad-hoc 署名・未公証のため、初回起動には quarantine 除去が要る（README「配布」参照）。

@@ -1,0 +1,65 @@
+import Foundation
+@testable import OtoLogCore
+import Testing
+
+struct PromptBuilderTests {
+    let jst = TimeZone(identifier: "Asia/Tokyo")!
+    let template = GenerationTemplate(id: "minutes", displayName: "議事録", instructions: "決定事項を整理する", isBuiltIn: true)
+    let session = SessionRef(
+        directoryName: "2026-07-29_1300_CEDEC講演",
+        title: "CEDEC講演",
+        startedAt: Date(timeIntervalSince1970: 1_785_297_600)
+    )
+
+    @Test func includesSystemRulesTemplateInstructionsAndSessionInfo() {
+        let prompt = PromptBuilder(timeZone: jst).prompt(
+            template: template, session: session,
+            segments: [TestFixtures.segment(text: "こんにちは")]
+        )
+        #expect(prompt.contains("結果の Markdown 本文のみ"))
+        #expect(prompt.contains("決定事項を整理する"))
+        #expect(prompt.contains("CEDEC講演（2026-07-29 13:00 開始）"))
+    }
+
+    /// finalizedAt 1785297600 = 2026-07-29 13:00:00 JST。ログ行はローカル時刻で刻む
+    @Test func formatsSegmentsAsTimestampedLinesInTimeZone() {
+        let prompt = PromptBuilder(timeZone: jst).prompt(
+            template: template, session: session,
+            segments: [
+                TestFixtures.segment(text: "最初の発話"),
+                TestFixtures.segment(text: "次の発話", finalizedAt: Date(timeIntervalSince1970: 1_785_297_612)),
+            ]
+        )
+        #expect(prompt.contains("[13:00:00] 最初の発話\n[13:00:12] 次の発話"))
+    }
+
+    /// 育てた修正辞書はプロンプトの専用セクションとして注入される
+    @Test func injectsCorrectionDictionarySection() {
+        let corrections = [
+            CorrectionEntry(
+                wrong: "家紋", right: "山", count: 3,
+                lastSeenAt: Date(timeIntervalSince1970: 1_785_297_600)
+            ),
+        ]
+        let prompt = PromptBuilder(timeZone: jst).prompt(
+            template: template, session: session,
+            segments: [TestFixtures.segment(text: "本文")],
+            corrections: corrections
+        )
+        #expect(prompt.contains("既知の修正辞書"))
+        #expect(prompt.contains("- 家紋 → 山"))
+        // 辞書なしならセクション自体が出ない
+        let plain = PromptBuilder(timeZone: jst).prompt(
+            template: template, session: session, segments: [TestFixtures.segment(text: "本文")]
+        )
+        #expect(!plain.contains("既知の修正辞書"))
+    }
+
+    @Test func collapsesNewlinesInsideSegmentText() {
+        let prompt = PromptBuilder(timeZone: jst).prompt(
+            template: template, session: session,
+            segments: [TestFixtures.segment(text: "1行目\n2行目")]
+        )
+        #expect(prompt.contains("[13:00:00] 1行目 2行目"))
+    }
+}
