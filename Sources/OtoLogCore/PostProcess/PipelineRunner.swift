@@ -411,7 +411,10 @@ public actor PipelineRunner {
                     running += 1
                 }
                 guard let (index, text) = try await group.next() else { break }
-                results[index] = PostProcessRunner.stripWrappingCodeFence(text)
+                // モデルが混ぜる前置き・後書き行（入力に無いタイムスタンプの行）を落として結合する
+                results[index] = LogChunker.filterToInputTimestamps(
+                    output: PostProcessRunner.stripWrappingCodeFence(text), inputChunk: chunks[index]
+                )
                 running -= 1
             }
         }

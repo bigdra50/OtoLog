@@ -24,22 +24,32 @@ public struct ClaudeCLIGenerator: StreamingTextGenerator {
 
     // MARK: Public
 
-    /// ユーザーのグローバル設定を上書きする項目。--settings で渡す（settings.json の env は
-    /// プロセス環境変数より優先されるため、環境変数ではなくここで上書きする必要がある）。
+    /// ヘッドレス後処理に必要な設定の明示。--setting-sources "" と併用する。
+    /// --settings 指定はユーザー settings.json の env を復活させる副作用があるため（実測）、
+    /// 遮断だけでは足りず thinking と effort をここで明示上書きする。
     /// - alwaysThinkingEnabled: false — thinking が max_tokens 予算を食うと全文書き直し系の
     ///   本文が1ターンに収まらず、自動継続で所要時間が数倍〜数十倍化する（12分/ターン × 3回+ の実測）
     /// - CLAUDE_CODE_EFFORT_LEVEL: high — effort max は thinking 無効の opus で 400 になる。
-    ///   後処理は書き写し・整形系が主のため high で足りる
+    ///   後処理は書き写し・整形系が主のため high で足りる。--effort フラグは env に負けるため不可
     public static let overrideSettingsJSON =
         #"{"alwaysThinkingEnabled": false, "env": {"CLAUDE_CODE_EFFORT_LEVEL": "high"}}"#
 
+    /// Claude Code の既定エージェントプロンプト（コーディング・ツール指示の長文）を置き換える。
+    /// 後処理には無関係な指示の混入を避け、入力トークンも減らす
+    public static let systemPrompt =
+        "音声文字起こしログを後処理するツールの内部エンジンとして、与えられた指示に厳密に従い、結果のテキストのみを出力する。"
+
     /// 安全側に倒した既定フラグ。
     /// --tools "" はツール全無効 = ログ由来のプロンプトインジェクションでもテキスト出力しかできない。
-    /// --model は付けずユーザーの CLI 既定に従う。--bare は認証を読まなくなるため使わない
+    /// --setting-sources "" でユーザー/プロジェクト settings.json（hooks・thinking・effort 等）を
+    /// 継承しない = 挙動が実行環境の個人設定に依存しない。
+    /// --model は付けずユーザーの CLI 既定に従う。--bare は OAuth 認証を読まなくなるため使わない
     public static let defaultArguments = [
         "-p", "--output-format", "text", "--tools", "",
         "--no-session-persistence", "--disable-slash-commands",
+        "--setting-sources", "",
         "--settings", ClaudeCLIGenerator.overrideSettingsJSON,
+        "--system-prompt", ClaudeCLIGenerator.systemPrompt,
     ]
 
     public func generate(prompt: String) async throws -> String {

@@ -5,13 +5,16 @@ import Testing
 struct ClaudeCLIGeneratorTests {
     // MARK: Internal
 
-    /// 安全フラグの契約: ツール全無効・セッション残さない・スラッシュコマンド無効・thinking 無効・effort 固定。
+    /// 安全フラグの契約: ツール全無効・セッション残さない・スラッシュコマンド無効・
+    /// ユーザー設定の継承遮断・thinking 無効・effort 固定・system prompt 置換。
     /// 変更は claude CLI 側の互換確認（mise run test:claude）とセットで行う
     @Test func defaultArgumentsArePinned() {
         #expect(ClaudeCLIGenerator.defaultArguments == [
             "-p", "--output-format", "text", "--tools", "",
             "--no-session-persistence", "--disable-slash-commands",
+            "--setting-sources", "",
             "--settings", ClaudeCLIGenerator.overrideSettingsJSON,
+            "--system-prompt", ClaudeCLIGenerator.systemPrompt,
         ])
         #expect(ClaudeCLIGenerator.overrideSettingsJSON.contains(#""alwaysThinkingEnabled": false"#))
         #expect(ClaudeCLIGenerator.overrideSettingsJSON.contains(#""CLAUDE_CODE_EFFORT_LEVEL": "high""#))

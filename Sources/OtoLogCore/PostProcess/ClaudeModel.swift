@@ -20,8 +20,10 @@ public extension ClaudeCLIGenerator {
         var arguments = ["-p", "--output-format", "text"]
         arguments += allowWebResearch ? ["--tools", "WebSearch", "WebFetch"] : ["--tools", ""]
         arguments += ["--no-session-persistence", "--disable-slash-commands"]
-        // グローバル設定の上書き理由は overrideSettingsJSON のコメント参照
+        // 設定遮断と上書きの理由は defaultArguments / overrideSettingsJSON のコメント参照
+        arguments += ["--setting-sources", ""]
         arguments += ["--settings", overrideSettingsJSON]
+        arguments += ["--system-prompt", systemPrompt]
         if let model {
             arguments += ["--model", model.rawValue]
         }
