@@ -68,6 +68,25 @@ struct TitleAssignerTests {
         }
     }
 
+    /// モデルの拒否文・説明文（句点を含む文章や長文）はタイトルに採用しない。
+    /// 「申し訳ございませんが、…1語のみのため…」がディレクトリ名になった実害の再発防止
+    @Test func rejectsSentenceLikeOrOverlongGeneratedTitle() async throws {
+        try await withTempDir { root in
+            let sentence = "申し訳ございませんが、提供いただいたログが「はい」という1語のみのため、内容を推測できません。"
+            for bad in [sentence, String(repeating: "長", count: 31)] {
+                let ref = try makeSession(in: root, name: "2026-07-29/1300", texts: ["はい"])
+                let assigner = TitleAssigner(
+                    saveDirectory: root, timeZone: jst, generator: FakeTextGenerator(result: bad),
+                    correctionStore: nil
+                )
+                await #expect(throws: TitleAssignerError.self) {
+                    _ = try await assigner.assignTitle(to: ref)
+                }
+                try FileManager.default.removeItem(at: root.appendingPathComponent("2026-07-29"))
+            }
+        }
+    }
+
     @Test func throwsWhenGeneratedTitleSanitizesToEmpty() async throws {
         try await withTempDir { root in
             let ref = try makeSession(in: root, name: "2026-07-29/1300", texts: ["本文"])

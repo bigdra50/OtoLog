@@ -36,7 +36,11 @@ public struct TitleAssigner: Sendable {
             .components(separatedBy: .newlines)
             .first { !$0.trimmingCharacters(in: .whitespaces).isEmpty } ?? ""
         let unquoted = firstLine.trimmingCharacters(in: CharacterSet(charactersIn: " \"'「」『』“”"))
-        guard let title = SessionDirectoryNamer.sanitizeTitle(unquoted) else {
+        // モデルの拒否文・説明文をタイトルにしない: 句点を含む文章や 30 字超は
+        // タイトルではないとみなし、切り詰め採用せずエラーへ倒す（手動対処を促す）
+        guard !unquoted.contains("。"), unquoted.count <= 30,
+              let title = SessionDirectoryNamer.sanitizeTitle(unquoted)
+        else {
             throw TitleAssignerError.unusableTitle(generated: generated)
         }
 
