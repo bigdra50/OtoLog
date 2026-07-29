@@ -28,6 +28,7 @@ public actor PipelineRunner {
         correctionStore: CorrectionDictionaryStore? = CorrectionDictionaryStore(),
         maxConcurrent: Int = 2,
         maxPromptCharacters: Int = 150_000,
+        correctionChunkCharacters: Int = 12_000,
         now: @escaping @Sendable () -> Date = Date.init
     ) {
         self.saveDirectory = saveDirectory
@@ -37,6 +38,7 @@ public actor PipelineRunner {
         self.correctionStore = correctionStore
         self.maxConcurrent = maxConcurrent
         self.maxPromptCharacters = maxPromptCharacters
+        self.correctionChunkCharacters = correctionChunkCharacters
         self.now = now
     }
 
@@ -85,6 +87,10 @@ public actor PipelineRunner {
         let continuation: AsyncStream<PipelineEvent>.Continuation
     }
 
+    /// チャンク補正の同時実行数。パイプライン全体の maxConcurrent とは独立
+    /// （correct 実行中は下流が依存待ちのため、実プロセス数はほぼこの値に収まる）
+    private static let chunkConcurrency = 2
+
     private let saveDirectory: URL
     private let timeZone: TimeZone
     private let generatorFactory: @Sendable (PlaybookTask) -> any TextGenerator
@@ -92,6 +98,12 @@ public actor PipelineRunner {
     private let correctionStore: CorrectionDictionaryStore?
     private let maxConcurrent: Int
     private let maxPromptCharacters: Int
+
+    /// correct のログ本文がこれを超えると行境界で分割し並列補正する。
+    /// 全文書き直しの出力が1ターン上限（32K トークン）を超えると自動継続で際限なく延びるため、
+    /// 1ターンで確実に収まるサイズに割る（21K 文字は1ターン完走、32K 文字は継続発生の実測から）
+    private let correctionChunkCharacters: Int
+
     private let now: @Sendable () -> Date
 
     private var runTask: Task<Void, Never>?
@@ -99,6 +111,19 @@ public actor PipelineRunner {
     private var taskStates: [String: PipelineTaskState] = [:]
     private var pendingIDs: [String] = []
     private var runningCount = 0
+
+    /// 単発生成。streaming 対応の generator なら生成中テキストを onProgress へ流す
+    private nonisolated static func generate(
+        prompt: String,
+        with generator: any TextGenerator,
+        onProgress: @escaping @Sendable (String) -> Void
+    ) async throws -> String {
+        if let streaming = generator as? StreamingTextGenerator {
+            let throttler = SnippetThrottler(onEmit: onProgress)
+            return try await streaming.generate(prompt: prompt) { throttler.append($0) }
+        }
+        return try await generator.generate(prompt: prompt)
+    }
 
     private func execute(
         playbook: Playbook,
@@ -317,21 +342,23 @@ public actor PipelineRunner {
             let corrections = task.templateID == "correct"
                 ? (correctionStore?.load().promptEntries() ?? [])
                 : []
-            let prompt = builder.prompt(
-                template: template, session: session, logBody: logBody,
-                dependencyOutputs: dependencyOutputs, corrections: corrections
-            )
-            guard prompt.count <= maxPromptCharacters else {
-                throw PostProcessError.promptTooLarge(characters: prompt.count, limit: maxPromptCharacters)
-            }
-
             let generator = generatorFactory(task)
             let generated: String
-            if let streaming = generator as? StreamingTextGenerator {
-                let throttler = SnippetThrottler(onEmit: onProgress)
-                generated = try await streaming.generate(prompt: prompt) { throttler.append($0) }
+            if task.templateID == "correct", logBody.count > correctionChunkCharacters {
+                generated = try await chunkedCorrection(
+                    logBody: logBody, template: template, session: session,
+                    corrections: corrections, builder: builder,
+                    generator: generator, onProgress: onProgress
+                )
             } else {
-                generated = try await generator.generate(prompt: prompt)
+                let prompt = builder.prompt(
+                    template: template, session: session, logBody: logBody,
+                    dependencyOutputs: dependencyOutputs, corrections: corrections
+                )
+                guard prompt.count <= maxPromptCharacters else {
+                    throw PostProcessError.promptTooLarge(characters: prompt.count, limit: maxPromptCharacters)
+                }
+                generated = try await Self.generate(prompt: prompt, with: generator, onProgress: onProgress)
             }
             let body = PostProcessRunner.stripWrappingCodeFence(generated)
             let header = "<!-- otolog:generated template=\(task.templateID) source=transcript.jsonl "
@@ -349,6 +376,46 @@ public actor PipelineRunner {
                 errorMessage: error.localizedDescription, wasCancelled: false
             )
         }
+    }
+
+    /// 長い correct を行境界のチャンクへ割り、並列（同時 chunkConcurrency）に補正して index 順に結合する。
+    /// 1チャンクでも失敗したらタスク全体を失敗にする（部分結合は行の欠落を生むため）
+    private nonisolated func chunkedCorrection(
+        logBody: String,
+        template: GenerationTemplate,
+        session: SessionRef,
+        corrections: [CorrectionEntry],
+        builder: PromptBuilder,
+        generator: any TextGenerator,
+        onProgress: @escaping @Sendable (String) -> Void
+    ) async throws -> String {
+        let chunks = LogChunker.split(logBody: logBody, maxCharacters: correctionChunkCharacters)
+        var results = [String?](repeating: nil, count: chunks.count)
+        try await withThrowingTaskGroup(of: (Int, String).self) { group in
+            var nextIndex = 0
+            var running = 0
+            while nextIndex < chunks.count || running > 0 {
+                while nextIndex < chunks.count, running < Self.chunkConcurrency {
+                    let index = nextIndex
+                    let prompt = builder.prompt(
+                        template: template, session: session, logBody: chunks[index],
+                        corrections: corrections
+                    )
+                    group.addTask {
+                        let text = try await Self.generate(
+                            prompt: prompt, with: generator, onProgress: onProgress
+                        )
+                        return (index, text)
+                    }
+                    nextIndex += 1
+                    running += 1
+                }
+                guard let (index, text) = try await group.next() else { break }
+                results[index] = PostProcessRunner.stripWrappingCodeFence(text)
+                running -= 1
+            }
+        }
+        return results.compactMap(\.self).joined(separator: "\n")
     }
 
     private func readMeta(in sessionDirectory: URL) -> SessionMeta? {

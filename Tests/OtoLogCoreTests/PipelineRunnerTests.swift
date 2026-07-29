@@ -283,13 +283,75 @@ struct PipelineRunnerTests {
         }
     }
 
+    /// ログ本文がチャンク上限を超える correct は、行境界で分割して複数回生成し出力を結合する。
+    /// 63KB の全文書き直しが1ターンの出力上限に収まらず自動継続で timeout した事故の対策
+    @Test(.timeLimit(.minutes(1))) func longCorrectSplitsIntoChunksAndJoinsOutputs() async throws {
+        try await withSessionDir { root, sessionDir in
+            // 1セグメント約40文字 × 6行。上限100文字 → 2行ずつ3チャンクになる
+            let lines = try (0..<6).map { index in
+                try JSONLCoder.encodeLine(TestFixtures.segment(
+                    text: "セグメント\(index)の本文をここに置いて長さを稼ぐテスト用文章",
+                    finalizedAt: Date(timeIntervalSince1970: 1_785_297_600 + Double(index))
+                ))
+            }
+            try (lines.joined(separator: "\n") + "\n").write(
+                to: sessionDir.appendingPathComponent("transcript.jsonl"), atomically: true, encoding: .utf8
+            )
+
+            let playbook = Playbook(id: "p", displayName: "p", tasks: [
+                PlaybookTask(templateID: "correct", model: .sonnet),
+            ])
+            let generator = FakeTextGenerator(result: "補正済みチャンク")
+            let runner = makeRunner(
+                root: root, generators: ["correct": generator], correctionChunkCharacters: 100
+            )
+
+            var finished: (done: Int, failed: Int, skipped: Int)?
+            for await event in await runner.run(playbook: playbook, session: session) {
+                if case let .finished(done, failed, skipped) = event {
+                    finished = (done, failed, skipped)
+                }
+            }
+
+            #expect(finished! == (done: 1, failed: 0, skipped: 0))
+            #expect(generator.receivedPrompts.count == 3)
+            // 各プロンプトは自分のチャンクの行だけを含む
+            #expect(generator.receivedPrompts.allSatisfy { $0.contains("セグメント") })
+            let promptsJoined = generator.receivedPrompts.joined()
+            for index in 0..<6 {
+                #expect(promptsJoined.contains("セグメント\(index)の本文"))
+            }
+            #expect(generator.receivedPrompts[0].contains("セグメント2の本文") == false)
+            // 出力はチャンク数ぶん結合される
+            let output = try String(contentsOf: sessionDir.appendingPathComponent("correct.md"), encoding: .utf8)
+            let occurrences = output.components(separatedBy: "補正済みチャンク").count - 1
+            #expect(occurrences == 3)
+        }
+    }
+
+    /// 上限以下の correct は従来どおり1回で生成する（不要な分割をしない）
+    @Test(.timeLimit(.minutes(1))) func shortCorrectStaysSingleCall() async throws {
+        try await withSessionDir { root, _ in
+            let playbook = Playbook(id: "p", displayName: "p", tasks: [
+                PlaybookTask(templateID: "correct", model: .sonnet),
+            ])
+            let generator = FakeTextGenerator(result: "補正済み")
+            let runner = makeRunner(
+                root: root, generators: ["correct": generator], correctionChunkCharacters: 100_000
+            )
+            for await _ in await runner.run(playbook: playbook, session: session) {}
+            #expect(generator.receivedPrompts.count == 1)
+        }
+    }
+
     // MARK: Private
 
     private func makeRunner(
         root: URL,
         generators: [String: FakeTextGenerator],
         maxConcurrent: Int = 2,
-        correctionStore: CorrectionDictionaryStore? = nil // テストから実 config を汚さない
+        correctionStore: CorrectionDictionaryStore? = nil, // テストから実 config を汚さない
+        correctionChunkCharacters: Int = 12_000
     ) -> PipelineRunner {
         PipelineRunner(
             saveDirectory: root,
@@ -297,6 +359,7 @@ struct PipelineRunnerTests {
             generatorFactory: { task in generators[task.templateID] ?? FakeTextGenerator(result: "未定義") },
             correctionStore: correctionStore,
             maxConcurrent: maxConcurrent,
+            correctionChunkCharacters: correctionChunkCharacters,
             now: { Date(timeIntervalSince1970: 1_785_297_600) }
         )
     }
