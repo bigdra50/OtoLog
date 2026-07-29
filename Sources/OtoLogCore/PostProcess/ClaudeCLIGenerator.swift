@@ -24,16 +24,22 @@ public struct ClaudeCLIGenerator: StreamingTextGenerator {
 
     // MARK: Public
 
+    /// ユーザーのグローバル設定を上書きする項目。--settings で渡す（settings.json の env は
+    /// プロセス環境変数より優先されるため、環境変数ではなくここで上書きする必要がある）。
+    /// - alwaysThinkingEnabled: false — thinking が max_tokens 予算を食うと全文書き直し系の
+    ///   本文が1ターンに収まらず、自動継続で所要時間が数倍〜数十倍化する（12分/ターン × 3回+ の実測）
+    /// - CLAUDE_CODE_EFFORT_LEVEL: high — effort max は thinking 無効の opus で 400 になる。
+    ///   後処理は書き写し・整形系が主のため high で足りる
+    public static let overrideSettingsJSON =
+        #"{"alwaysThinkingEnabled": false, "env": {"CLAUDE_CODE_EFFORT_LEVEL": "high"}}"#
+
     /// 安全側に倒した既定フラグ。
     /// --tools "" はツール全無効 = ログ由来のプロンプトインジェクションでもテキスト出力しかできない。
-    /// --model は付けずユーザーの CLI 既定に従う。--bare は認証を読まなくなるため使わない。
-    /// thinking はユーザー設定（alwaysThinkingEnabled）に関わらず明示無効化する:
-    /// thinking が max_tokens 予算を食うと全文書き直し系の本文が1ターンに収まらず、
-    /// 自動継続で所要時間が数倍〜数十倍化する（12分/ターン × 3回+ の実測）
+    /// --model は付けずユーザーの CLI 既定に従う。--bare は認証を読まなくなるため使わない
     public static let defaultArguments = [
         "-p", "--output-format", "text", "--tools", "",
         "--no-session-persistence", "--disable-slash-commands",
-        "--settings", #"{"alwaysThinkingEnabled": false}"#,
+        "--settings", ClaudeCLIGenerator.overrideSettingsJSON,
     ]
 
     public func generate(prompt: String) async throws -> String {
@@ -78,9 +84,12 @@ public struct ClaudeCLIGenerator: StreamingTextGenerator {
         )
 
         guard result.terminationStatus == 0 else {
+            // claude -p は API エラーを stdout（stream-json の result）へ出すことがあるため、
+            // stderr が空なら stdout 末尾を診断に使う
+            let stderrTail = Self.tail(of: result.stderr)
             throw ClaudeCLIGeneratorError.nonZeroExit(
                 code: result.terminationStatus,
-                stderr: Self.tail(of: result.stderr)
+                stderr: stderrTail.isEmpty ? Self.tail(of: result.stdout) : stderrTail
             )
         }
         let output = String(decoding: result.stdout, as: UTF8.self)
@@ -141,9 +150,12 @@ public struct ClaudeCLIGenerator: StreamingTextGenerator {
         )
 
         guard result.terminationStatus == 0 else {
+            // claude -p は API エラーを stdout（stream-json の result）へ出すことがあるため、
+            // stderr が空なら stdout 末尾を診断に使う
+            let stderrTail = Self.tail(of: result.stderr)
             throw ClaudeCLIGeneratorError.nonZeroExit(
                 code: result.terminationStatus,
-                stderr: Self.tail(of: result.stderr)
+                stderr: stderrTail.isEmpty ? Self.tail(of: result.stdout) : stderrTail
             )
         }
         let output = parser.finalResult(fallbackStdout: result.stdout)

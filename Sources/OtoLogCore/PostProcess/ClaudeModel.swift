@@ -20,8 +20,8 @@ public extension ClaudeCLIGenerator {
         var arguments = ["-p", "--output-format", "text"]
         arguments += allowWebResearch ? ["--tools", "WebSearch", "WebFetch"] : ["--tools", ""]
         arguments += ["--no-session-persistence", "--disable-slash-commands"]
-        // thinking 明示無効の理由は defaultArguments のコメント参照
-        arguments += ["--settings", #"{"alwaysThinkingEnabled": false}"#]
+        // グローバル設定の上書き理由は overrideSettingsJSON のコメント参照
+        arguments += ["--settings", overrideSettingsJSON]
         if let model {
             arguments += ["--model", model.rawValue]
         }

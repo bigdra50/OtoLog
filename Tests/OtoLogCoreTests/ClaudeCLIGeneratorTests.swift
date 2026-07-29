@@ -5,14 +5,37 @@ import Testing
 struct ClaudeCLIGeneratorTests {
     // MARK: Internal
 
-    /// 安全フラグの契約: ツール全無効・セッション残さない・スラッシュコマンド無効・thinking 無効。
+    /// 安全フラグの契約: ツール全無効・セッション残さない・スラッシュコマンド無効・thinking 無効・effort 固定。
     /// 変更は claude CLI 側の互換確認（mise run test:claude）とセットで行う
     @Test func defaultArgumentsArePinned() {
         #expect(ClaudeCLIGenerator.defaultArguments == [
             "-p", "--output-format", "text", "--tools", "",
             "--no-session-persistence", "--disable-slash-commands",
-            "--settings", #"{"alwaysThinkingEnabled": false}"#,
+            "--settings", ClaudeCLIGenerator.overrideSettingsJSON,
         ])
+        #expect(ClaudeCLIGenerator.overrideSettingsJSON.contains(#""alwaysThinkingEnabled": false"#))
+        #expect(ClaudeCLIGenerator.overrideSettingsJSON.contains(#""CLAUDE_CODE_EFFORT_LEVEL": "high""#))
+    }
+
+    /// claude -p はエラーを stdout（stream-json の result）へ出すことがあり、stderr が空だと
+    /// エラー内容が失われる。stderr 空のときは stdout 末尾を診断に使う
+    @Test func nonZeroExitFallsBackToStdoutWhenStderrEmpty() async {
+        let generator = ClaudeCLIGenerator(
+            executableURL: URL(fileURLWithPath: "/bin/sh"),
+            arguments: ["-c", "echo 'API Error: 400 effort not supported'; exit 1"]
+        )
+        do {
+            _ = try await generator.generate(prompt: "x")
+            Issue.record("nonZeroExit になるはず")
+        } catch let error as ClaudeCLIGeneratorError {
+            guard case let .nonZeroExit(_, diagnostic) = error else {
+                Issue.record("想定外のエラー: \(error)")
+                return
+            }
+            #expect(diagnostic.contains("API Error: 400"))
+        } catch {
+            Issue.record("想定外のエラー型: \(error)")
+        }
     }
 
     @Test func passesPromptThroughStdinAndReturnsStdout() async throws {

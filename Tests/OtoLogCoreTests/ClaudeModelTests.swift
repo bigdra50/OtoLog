@@ -6,20 +6,21 @@ struct ClaudeModelTests {
     /// タスク属性 → claude -p 引数の合成規則の固定。
     /// --tools の variadic 指定（WebSearch WebFetch）は実 CLI v2.1.220 で動作確認済み
     @Test func composesArgumentsForModelAndWebCombinations() {
+        let settings = ClaudeCLIGenerator.overrideSettingsJSON
         #expect(ClaudeCLIGenerator.arguments(model: nil, allowWebResearch: false) == [
             "-p", "--output-format", "text", "--tools", "",
             "--no-session-persistence", "--disable-slash-commands",
-            "--settings", #"{"alwaysThinkingEnabled": false}"#,
+            "--settings", settings,
         ])
         #expect(ClaudeCLIGenerator.arguments(model: .haiku, allowWebResearch: false) == [
             "-p", "--output-format", "text", "--tools", "",
             "--no-session-persistence", "--disable-slash-commands",
-            "--settings", #"{"alwaysThinkingEnabled": false}"#, "--model", "haiku",
+            "--settings", settings, "--model", "haiku",
         ])
         #expect(ClaudeCLIGenerator.arguments(model: .sonnet, allowWebResearch: true) == [
             "-p", "--output-format", "text", "--tools", "WebSearch", "WebFetch",
             "--no-session-persistence", "--disable-slash-commands",
-            "--settings", #"{"alwaysThinkingEnabled": false}"#, "--model", "sonnet",
+            "--settings", settings, "--model", "sonnet",
         ])
         #expect(ClaudeCLIGenerator.arguments(model: .opus, allowWebResearch: true).contains("opus"))
     }

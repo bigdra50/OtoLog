@@ -95,13 +95,18 @@ if args[1] == "classify" {
 if args[1] == "run-playbook" {
     guard args.count >= 4 else {
         FileHandle.standardError.write(
-            Data("usage: otolog-devtool run-playbook <dir> <sessionDirName> [playbookID]\n".utf8)
+            Data("usage: otolog-devtool run-playbook <dir> <sessionDirName> [playbookID] [--only id,id]\n".utf8)
         )
         exit(64)
     }
     let directory = URL(fileURLWithPath: (args[2] as NSString).expandingTildeInPath, isDirectory: true)
     let sessionName = args[3]
-    let playbookID = args.count >= 5 ? args[4] : "lecture"
+    let playbookID = args.count >= 5 && args[4] != "--only" ? args[4] : "lecture"
+    // --only id,id で指定タスクだけを再実行する（依存の充足は前回 done の成果物を再利用）
+    var only: [String]?
+    if let flagIndex = args.firstIndex(of: "--only"), flagIndex + 1 < args.count {
+        only = args[flagIndex + 1].split(separator: ",").map(String.init)
+    }
 
     let reader = TranscriptReader(directory: directory, timeZone: .current)
     guard let session = reader.availableSessions().first(where: { $0.directoryName == sessionName }) else {
@@ -129,8 +134,8 @@ if args[1] == "run-playbook" {
             )
         }
     )
-    print("run: \(playbook.displayName) → \(session.displayName)")
-    for await event in await runner.run(playbook: playbook, session: session) {
+    print("run: \(playbook.displayName) → \(session.displayName)\(only.map { " only=\($0.joined(separator: ","))" } ?? "")")
+    for await event in await runner.run(playbook: playbook, session: session, only: only) {
         switch event {
         case let .taskStateChanged(taskID, state):
             let suffix = state.error.map { " (\($0))" } ?? ""
