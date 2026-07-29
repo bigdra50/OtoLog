@@ -139,7 +139,13 @@ mise run skill:install      # otolog-generate スキルを ~/.claude/skills へ 
 swift run otolog-devtool <audio-file> [locale]        # エンジン単体の検証CLI
 swift run otolog-devtool export-templates <dir>       # 組み込みテンプレートの書き出し
 swift run otolog-devtool migrate-daily <dir>          # 旧日次形式をセッション構造へ移行
+swift run otolog-devtool ctl <status|start|stop>      # 起動中アプリの制御（エージェント連携用）
 ```
+
+`ctl` は起動中のアプリを Unix ドメインソケット（`$XDG_STATE_HOME/otolog/control.sock`、0600 で自ユーザーのみ）経由で操作する。
+応答は JSON 1行（`{"ok":true,"state":"recording","sessionPath":"..."}`）で、`ok: false` は exit 1、アプリ未起動は exit 69。
+エージェントや自動化から UI 操作（AX）なしで記録の開始・停止・状態確認ができる。
+初回の「システム音声の録音」許可ダイアログだけは人の操作が必要。
 
 - `OTOLOG_TRACE=1` でエンジン内部のトレースが stderr に出る
 - `OTOLOG_CLAUDE_DEBUG=1` で claude 呼び出しごとの診断ログを `$XDG_STATE_HOME/otolog/claude-logs/`（既定 `~/.local/state/...`）へ保存する。呼び出しタイムライン（`.log`: 引数・プロンプトサイズ・チャンク受信・終了/エラー）と claude CLI 内部ログ（`-cli.log`: API リクエスト・リトライ）の2ファイル1組。生成が進んでいるか・リトライで詰まっているかの切り分けに使う

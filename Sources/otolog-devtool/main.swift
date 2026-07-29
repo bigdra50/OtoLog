@@ -16,9 +16,33 @@ guard args.count >= 2 else {
            otolog-devtool export-templates <dir>
            otolog-devtool migrate-daily <dir>
            otolog-devtool run-playbook <dir> <sessionDirName> [playbookID]
+           otolog-devtool ctl <status|start|stop>
 
     """.utf8))
     exit(64)
+}
+
+// 起動中のアプリを制御ソケット経由で操作する（エージェント・自動化の正規経路）。
+// 応答は JSON 1行で、ok: false は exit 1、接続不可（アプリ未起動）は exit 69
+if args[1] == "ctl" {
+    guard args.count >= 3, let command = ControlCommand(rawValue: args[2]) else {
+        FileHandle.standardError.write(Data("usage: otolog-devtool ctl <status|start|stop>\n".utf8))
+        exit(64)
+    }
+    let socketPath = ProcessInfo.processInfo.environment["OTOLOG_CONTROL_SOCKET"]
+        ?? ControlSocketPath.default()
+    do {
+        let response = try await ControlClient.send(
+            ControlRequest(command: command), socketPath: socketPath
+        )
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.sortedKeys]
+        try print(String(decoding: encoder.encode(response), as: UTF8.self))
+        exit(response.ok ? 0 : 1)
+    } catch {
+        FileHandle.standardError.write(Data("\(error.localizedDescription)\n".utf8))
+        exit(69)
+    }
 }
 
 // 組み込みテンプレートの md 書き出し（スキル同梱 templates/ の再生成に使う）

@@ -100,6 +100,47 @@ import OtoLogCore
         NSWorkspace.shared.open(url)
     }
 
+    // MARK: 制御ソケット（CLI・エージェントの正規経路。UI と同じ操作を AX なしで提供する）
+
+    func controlStatus() async -> ControlResponse {
+        await ControlResponse(
+            ok: true, state: Self.describe(session.state), sessionPath: latestSessionPath()
+        )
+    }
+
+    /// 状態遷移（recording / failed）の完了まで待って結果を返す。二重開始は reject
+    func controlStart() async -> ControlResponse {
+        let before = await session.state
+        guard before == .idle || Self.isFailed(before) else {
+            return ControlResponse(
+                ok: false, error: "既に記録中です",
+                state: Self.describe(before), sessionPath: latestSessionPath()
+            )
+        }
+        await session.start(locale: Locale(identifier: settings.localeIdentifier))
+        let after = await session.state
+        if case let .failed(message) = after {
+            return ControlResponse(ok: false, error: message, state: Self.describe(after))
+        }
+        return ControlResponse(
+            ok: after == .recording, state: Self.describe(after), sessionPath: latestSessionPath()
+        )
+    }
+
+    func controlStop() async -> ControlResponse {
+        let before = await session.state
+        guard before == .recording || before == .preparing else {
+            return ControlResponse(
+                ok: false, error: "記録していません",
+                state: Self.describe(before), sessionPath: latestSessionPath()
+            )
+        }
+        await session.stop()
+        return await ControlResponse(
+            ok: true, state: Self.describe(session.state), sessionPath: latestSessionPath()
+        )
+    }
+
     // MARK: Private
 
     private let session: RecordingSession
@@ -107,6 +148,26 @@ import OtoLogCore
     private let state: AppState
     private let settings: AppSettings
     private var eventTask: Task<Void, Never>?
+
+    private static func describe(_ state: SessionState) -> String {
+        switch state {
+        case .idle: "idle"
+        case .preparing: "preparing"
+        case .recording: "recording"
+        case .stopping: "stopping"
+        case .failed: "failed"
+        }
+    }
+
+    private static func isFailed(_ state: SessionState) -> Bool {
+        if case .failed = state { return true }
+        return false
+    }
+
+    private func latestSessionPath() -> String? {
+        TranscriptReader(directory: settings.saveDirectory, timeZone: .current)
+            .availableSessions().first?.directoryName
+    }
 
     private func apply(_ event: SessionEvent) {
         switch event {
