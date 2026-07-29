@@ -5,6 +5,8 @@ import Foundation
 /// パイプライン実行の進捗イベント（UI 表示用）。
 public enum PipelineEvent: Sendable, Equatable {
     case taskStateChanged(taskID: String, state: PipelineTaskState)
+    /// 実行中タスクの生成中テキストの末尾（生存確認のライブ表示用。永続化しない）
+    case taskProgress(taskID: String, snippet: String)
     case finished(done: Int, failed: Int, skipped: Int)
 }
 
@@ -218,10 +220,14 @@ public actor PipelineRunner {
             let session = context.session
             let sessionDirectory = context.sessionDirectory
             let segments = context.segments
+            let taskID = candidate.id
             group.addTask {
                 await self.performTask(
                     candidate, template: template, session: session,
-                    sessionDirectory: sessionDirectory, segments: segments, states: snapshot
+                    sessionDirectory: sessionDirectory, segments: segments, states: snapshot,
+                    onProgress: { snippet in
+                        Task { await self.emitProgress(taskID: taskID, snippet: snippet) }
+                    }
                 )
             }
         }
@@ -263,6 +269,12 @@ public actor PipelineRunner {
         try? correctionStore.record(pairs, now: now())
     }
 
+    /// 実行中タスクのライブ表示。running 以外（完了後の遅延到着）は流さない
+    private func emitProgress(taskID: String, snippet: String) {
+        guard taskStates[taskID]?.status == .running else { return }
+        context?.continuation.yield(.taskProgress(taskID: taskID, snippet: snippet))
+    }
+
     /// 1タスクの生成と書き出し。actor 隔離外で並行実行される
     private nonisolated func performTask(
         _ task: PlaybookTask,
@@ -270,7 +282,8 @@ public actor PipelineRunner {
         session: SessionRef,
         sessionDirectory: URL,
         segments: [TranscriptSegment],
-        states: [String: PipelineTaskState]
+        states: [String: PipelineTaskState],
+        onProgress: @escaping @Sendable (String) -> Void
     ) async -> TaskOutcome {
         do {
             let builder = PromptBuilder(timeZone: timeZone)
@@ -312,7 +325,14 @@ public actor PipelineRunner {
                 throw PostProcessError.promptTooLarge(characters: prompt.count, limit: maxPromptCharacters)
             }
 
-            let generated = try await generatorFactory(task).generate(prompt: prompt)
+            let generator = generatorFactory(task)
+            let generated: String
+            if let streaming = generator as? StreamingTextGenerator {
+                let throttler = SnippetThrottler(onEmit: onProgress)
+                generated = try await streaming.generate(prompt: prompt) { throttler.append($0) }
+            } else {
+                generated = try await generator.generate(prompt: prompt)
+            }
             let body = PostProcessRunner.stripWrappingCodeFence(generated)
             let header = "<!-- otolog:generated template=\(task.templateID) source=transcript.jsonl "
                 + "generatedAt=\(PostProcessRunner.iso8601(now())) -->"

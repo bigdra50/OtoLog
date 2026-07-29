@@ -25,7 +25,8 @@ public enum CommandRunner {
         stdin stdinData: Data,
         currentDirectoryURL: URL? = nil,
         environment: [String: String]? = nil,
-        timeout: Duration = .seconds(600)
+        timeout: Duration = .seconds(600),
+        onStdoutChunk: (@Sendable (Data) -> Void)? = nil
     ) async throws -> CommandResult {
         let stdinURL = FileManager.default.temporaryDirectory
             .appendingPathComponent("otolog-stdin-\(UUID().uuidString)")
@@ -66,7 +67,7 @@ public enum CommandRunner {
         return try await withTaskCancellationHandler {
             try await withThrowingTaskGroup(of: CommandResult?.self) { group in
                 group.addTask {
-                    async let stdout = Self.drain(outBox)
+                    async let stdout = Self.drain(outBox, onChunk: onStdoutChunk)
                     async let stderr = Self.drain(errBox)
                     var status: Int32 = -1
                     for await value in exitStream {
@@ -96,16 +97,20 @@ public enum CommandRunner {
 
     // MARK: Private
 
-    /// EOF までまとめて読む。FileHandle.bytes のバイト単位イテレーションは MB 級入力で遅すぎるため、
-    /// ブロッキングの readToEnd を global queue に逃がす（プロセスは SIGKILL まで含めて必ず死ぬので EOF は保証される）
-    private static func drain(_ box: HandleBox) async throws -> Data {
-        try await withCheckedThrowingContinuation { continuation in
+    /// EOF までチャンク単位で読む。FileHandle.bytes のバイト単位イテレーションは MB 級入力で遅すぎるため、
+    /// ブロッキング読みを global queue に逃がす（プロセスは SIGKILL まで含めて必ず死ぬので EOF は保証される）。
+    /// onChunk で到着ごとの逐次観測（ライブ進捗表示）ができる
+    private static func drain(_ box: HandleBox, onChunk: (@Sendable (Data) -> Void)? = nil) async throws -> Data {
+        await withCheckedContinuation { continuation in
             DispatchQueue.global().async {
-                do {
-                    try continuation.resume(returning: box.handle.readToEnd() ?? Data())
-                } catch {
-                    continuation.resume(throwing: error)
+                var data = Data()
+                while true {
+                    let chunk = box.handle.availableData
+                    guard !chunk.isEmpty else { break } // EOF
+                    data.append(chunk)
+                    onChunk?(chunk)
                 }
+                continuation.resume(returning: data)
             }
         }
     }

@@ -82,15 +82,26 @@ import OtoLogCore
         pipelineTask = Task { [state] in
             let stream = await runner.run(playbook: playbook, session: session, only: only)
             for await event in stream {
-                guard case let .taskStateChanged(taskID, taskState) = event else { continue }
-                if let index = state.pipelineTasks.firstIndex(where: { $0.id == taskID }) {
-                    state.pipelineTasks[index].state = taskState
-                } else {
-                    state.pipelineTasks.append(PipelineTaskDisplay(
-                        id: taskID,
-                        displayName: templates.first { $0.id == taskID }?.displayName ?? taskID,
-                        state: taskState
-                    ))
+                switch event {
+                case let .taskStateChanged(taskID, taskState):
+                    if let index = state.pipelineTasks.firstIndex(where: { $0.id == taskID }) {
+                        state.pipelineTasks[index].state = taskState
+                        if taskState.status != .running {
+                            state.pipelineTasks[index].snippet = nil
+                        }
+                    } else {
+                        state.pipelineTasks.append(PipelineTaskDisplay(
+                            id: taskID,
+                            displayName: templates.first { $0.id == taskID }?.displayName ?? taskID,
+                            state: taskState
+                        ))
+                    }
+                case let .taskProgress(taskID, snippet):
+                    if let index = state.pipelineTasks.firstIndex(where: { $0.id == taskID }) {
+                        state.pipelineTasks[index].snippet = snippet
+                    }
+                case .finished:
+                    break
                 }
             }
             state.pipelineRunning = false

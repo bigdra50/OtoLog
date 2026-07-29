@@ -37,6 +37,8 @@ struct PipelineRunnerTests {
                     transitions.append((taskID, state.status))
                 case let .finished(done, failed, skipped):
                     finished = (done, failed, skipped)
+                case .taskProgress:
+                    break
                 }
             }
 
@@ -140,6 +142,8 @@ struct PipelineRunnerTests {
                     finalStates[taskID] = state.status
                 case let .finished(done, failed, skipped):
                     finished = (done, failed, skipped)
+                case .taskProgress:
+                    break
                 }
             }
 
@@ -190,6 +194,27 @@ struct PipelineRunnerTests {
             #expect(meta.playbookID == "mini")
             #expect(meta.pipeline?["summary"]?.status == .done)
             #expect(meta.pipeline?["summary"]?.outputFile == "summary.md")
+        }
+    }
+
+    /// ストリーミング対応 generator の生成中テキストが taskProgress として流れる
+    @Test(.timeLimit(.minutes(1))) func emitsTaskProgressFromStreamingGenerator() async throws {
+        try await withSessionDir { root, _ in
+            let playbook = Playbook(id: "p", displayName: "p", tasks: [
+                PlaybookTask(templateID: "summary", model: .sonnet),
+            ])
+            let generator = FakeTextGenerator(result: "要約結果")
+            generator.partials = ["生成中の", "テキスト片"]
+            let runner = makeRunner(root: root, generators: ["summary": generator])
+
+            var snippets: [String] = []
+            for await event in await runner.run(playbook: playbook, session: session) {
+                if case let .taskProgress(taskID, snippet) = event {
+                    #expect(taskID == "summary")
+                    snippets.append(snippet)
+                }
+            }
+            #expect(!snippets.isEmpty)
         }
     }
 

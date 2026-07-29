@@ -2,7 +2,8 @@ import Foundation
 @testable import OtoLogCore
 
 /// 受け取ったプロンプトを記録し、固定結果かエラーを返す TextGenerator。
-final class FakeTextGenerator: TextGenerator, @unchecked Sendable {
+/// partials を設定するとストリーミング版でその断片が順に流れる。
+final class FakeTextGenerator: StreamingTextGenerator, @unchecked Sendable {
     // MARK: Lifecycle
 
     init(result: String = "", delay: Duration = .zero) {
@@ -26,6 +27,11 @@ final class FakeTextGenerator: TextGenerator, @unchecked Sendable {
         lock.withLock { _receivedPrompts }
     }
 
+    var partials: [String] {
+        get { lock.withLock { _partials } }
+        set { lock.withLock { _partials = newValue } }
+    }
+
     func generate(prompt: String) async throws -> String {
         lock.withLock { _receivedPrompts.append(prompt) }
         if delay > .zero {
@@ -37,6 +43,16 @@ final class FakeTextGenerator: TextGenerator, @unchecked Sendable {
         return result
     }
 
+    func generate(
+        prompt: String,
+        onPartial: @escaping @Sendable (String) -> Void
+    ) async throws -> String {
+        for partial in partials {
+            onPartial(partial)
+        }
+        return try await generate(prompt: prompt)
+    }
+
     // MARK: Private
 
     private let lock = NSLock()
@@ -44,4 +60,5 @@ final class FakeTextGenerator: TextGenerator, @unchecked Sendable {
     private var _result: String
     private var _errorToThrow: (any Error)?
     private var _receivedPrompts: [String] = []
+    private var _partials: [String] = []
 }

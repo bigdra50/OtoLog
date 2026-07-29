@@ -134,6 +134,8 @@ if args[1] == "run-playbook" {
         case let .taskStateChanged(taskID, state):
             let suffix = state.error.map { " (\($0))" } ?? ""
             print("\(taskID): \(state.status.rawValue)\(suffix)")
+        case .taskProgress:
+            break // CLI では逐次スニペットは流さない（状態遷移のみ）
         case let .finished(done, failed, skipped):
             print("finished: done=\(done) failed=\(failed) skipped=\(skipped)")
             exit(failed > 0 ? 1 : 0)

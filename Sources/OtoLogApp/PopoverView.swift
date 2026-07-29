@@ -316,32 +316,43 @@ struct PopoverView: View {
     }
 
     private func pipelineTaskRow(_ task: PipelineTaskDisplay) -> some View {
-        HStack(spacing: 6) {
-            switch task.state.status {
-            case .pending:
-                Image(systemName: "circle")
-                    .foregroundStyle(.secondary)
-            case .running:
-                ProgressView()
-                    .controlSize(.mini)
-            case .done:
-                Image(systemName: "checkmark.circle.fill")
-                    .foregroundStyle(.green)
-            case .failed:
-                Image(systemName: "xmark.circle.fill")
-                    .foregroundStyle(.red)
-            case .skipped:
-                Image(systemName: "minus.circle")
-                    .foregroundStyle(.secondary)
+        VStack(alignment: .leading, spacing: 2) {
+            HStack(spacing: 6) {
+                switch task.state.status {
+                case .pending:
+                    Image(systemName: "circle")
+                        .foregroundStyle(.secondary)
+                case .running:
+                    ProgressView()
+                        .controlSize(.mini)
+                case .done:
+                    Image(systemName: "checkmark.circle.fill")
+                        .foregroundStyle(.green)
+                case .failed:
+                    Image(systemName: "xmark.circle.fill")
+                        .foregroundStyle(.red)
+                case .skipped:
+                    Image(systemName: "minus.circle")
+                        .foregroundStyle(.secondary)
+                }
+                Text(task.displayName)
+                Spacer()
+                if task.state.status == .failed, let error = task.state.error {
+                    Text(error)
+                        .font(.caption2)
+                        .foregroundStyle(.red)
+                        .lineLimit(1)
+                        .truncationMode(.tail)
+                }
             }
-            Text(task.displayName)
-            Spacer()
-            if task.state.status == .failed, let error = task.state.error {
-                Text(error)
+            // 生成中の claude の出力/thinking の末尾。動いていることの生存確認
+            if task.state.status == .running, let snippet = task.snippet, !snippet.isEmpty {
+                Text(snippet)
                     .font(.caption2)
-                    .foregroundStyle(.red)
-                    .lineLimit(1)
-                    .truncationMode(.tail)
+                    .foregroundStyle(.tertiary)
+                    .lineLimit(2)
+                    .truncationMode(.head)
+                    .padding(.leading, 20)
             }
         }
     }

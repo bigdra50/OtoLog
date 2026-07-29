@@ -57,6 +57,35 @@ struct ClaudeCLIGeneratorTests {
         }
     }
 
+    /// ストリーミング版は text 指定を stream-json 一式へ差し替える
+    @Test func streamingArgumentsReplaceTextOutputFormat() {
+        let streaming = ClaudeCLIGenerator.streamingArguments(from: ClaudeCLIGenerator.defaultArguments)
+        #expect(streaming.contains("stream-json"))
+        #expect(streaming.contains("--include-partial-messages"))
+        #expect(streaming.contains("--verbose"))
+        #expect(!streaming.contains("text"))
+        // text 指定が無い引数（テスト注入等）はそのまま
+        #expect(ClaudeCLIGenerator.streamingArguments(from: []) == [])
+    }
+
+    /// stream-json のデルタが onPartial へ流れ、最終テキストは result イベントから取れる
+    @Test func streamsPartialsAndExtractsResult() async throws {
+        let script = """
+        printf '%s\\n' '{"type":"stream_event","event":{"type":"content_block_delta","delta":{"thinking":"考え中"}}}'
+        printf '%s\\n' '{"type":"stream_event","event":{"type":"content_block_delta","delta":{"text":"本文A"}}}'
+        printf '%s\\n' '{"type":"stream_event","event":{"type":"content_block_delta","delta":{"text":"本文B"}}}'
+        printf '%s\\n' '{"type":"result","subtype":"success","result":"最終テキスト"}'
+        """
+        let generator = ClaudeCLIGenerator(
+            executableURL: URL(fileURLWithPath: "/bin/sh"), arguments: ["-c", script]
+        )
+        let collector = PartialCollector()
+        let output = try await generator.generate(prompt: "x") { collector.append($0) }
+        #expect(output == "最終テキスト")
+        #expect(collector.values.contains("考え中"))
+        #expect(collector.values.contains("本文A"))
+    }
+
     /// GUI 起動時の PATH（/usr/bin:/bin のみ）対策と、プロジェクト設定を拾わない空 cwd の契約
     @Test func runsInEmptyTempDirWithExecutableDirOnPath() async throws {
         try await withTempDir { dir in
@@ -74,6 +103,23 @@ struct ClaudeCLIGeneratorTests {
     }
 
     // MARK: Private
+
+    private final class PartialCollector: @unchecked Sendable {
+        // MARK: Internal
+
+        var values: [String] {
+            lock.withLock { _values }
+        }
+
+        func append(_ value: String) {
+            lock.withLock { _values.append(value) }
+        }
+
+        // MARK: Private
+
+        private let lock = NSLock()
+        private var _values: [String] = []
+    }
 
     private func withTempDir(_ body: (URL) async throws -> Void) async throws {
         let dir = FileManager.default.temporaryDirectory

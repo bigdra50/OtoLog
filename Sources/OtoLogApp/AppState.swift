@@ -19,6 +19,8 @@ struct PipelineTaskDisplay: Equatable, Identifiable {
     let id: String
     let displayName: String
     var state: PipelineTaskState
+    /// 実行中の生成テキスト末尾（生存確認のライブ表示。永続化しない）
+    var snippet: String?
 }
 
 // MARK: - AppState

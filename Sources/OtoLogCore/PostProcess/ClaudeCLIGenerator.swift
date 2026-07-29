@@ -4,7 +4,8 @@ import Foundation
 
 /// claude -p をサブプロセスとして呼ぶ TextGenerator 実装。
 /// プロンプトは stdin で渡す（引数長制限 ARG_MAX の回避）。
-public struct ClaudeCLIGenerator: TextGenerator {
+/// ストリーミング版は stream-json でデルタ（本文・thinking）を逐次観測できる。
+public struct ClaudeCLIGenerator: StreamingTextGenerator {
     // MARK: Lifecycle
 
     public init(
@@ -65,6 +66,65 @@ public struct ClaudeCLIGenerator: TextGenerator {
             throw ClaudeCLIGeneratorError.emptyOutput
         }
         return output
+    }
+
+    /// ストリーミング版: stream-json のデルタ（本文・thinking）を onPartial へ逐次流し、
+    /// 最終テキストは result イベントから取り出す
+    public func generate(
+        prompt: String,
+        onPartial: @escaping @Sendable (String) -> Void
+    ) async throws -> String {
+        guard FileManager.default.isExecutableFile(atPath: executableURL.path) else {
+            throw ClaudeCLIGeneratorError.executableNotFound(path: executableURL.path)
+        }
+
+        let workDir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("otolog-claude-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: workDir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: workDir) }
+
+        var environment = ProcessInfo.processInfo.environment
+        let binDir = executableURL.deletingLastPathComponent().path
+        environment["PATH"] = ((environment["PATH"].map { "\($0):" }) ?? "") + binDir
+
+        let parser = StreamEventParser(onPartial: onPartial)
+        let result = try await CommandRunner.run(
+            executable: executableURL,
+            arguments: Self.streamingArguments(from: arguments),
+            stdin: Data(prompt.utf8),
+            currentDirectoryURL: workDir,
+            environment: environment,
+            timeout: timeout,
+            onStdoutChunk: { parser.consume($0) }
+        )
+
+        guard result.terminationStatus == 0 else {
+            throw ClaudeCLIGeneratorError.nonZeroExit(
+                code: result.terminationStatus,
+                stderr: Self.tail(of: result.stderr)
+            )
+        }
+        let output = parser.finalResult(fallbackStdout: result.stdout)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !output.isEmpty else {
+            throw ClaudeCLIGeneratorError.emptyOutput
+        }
+        return output
+    }
+
+    // MARK: Internal
+
+    /// --output-format text を stream-json 一式へ差し替える（テスト注入等で text 指定が無ければそのまま）
+    static func streamingArguments(from arguments: [String]) -> [String] {
+        guard let index = arguments.firstIndex(of: "--output-format"),
+              index + 1 < arguments.count, arguments[index + 1] == "text"
+        else { return arguments }
+        var result = arguments
+        result.replaceSubrange(
+            index...index + 1,
+            with: ["--output-format", "stream-json", "--include-partial-messages", "--verbose"]
+        )
+        return result
     }
 
     // MARK: Private
