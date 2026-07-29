@@ -112,7 +112,7 @@ import OtoLogCore
     func controlStart() async -> ControlResponse {
         let before = await session.state
         guard before == .idle || Self.isFailed(before) else {
-            return ControlResponse(
+            return await ControlResponse(
                 ok: false, error: "既に記録中です",
                 state: Self.describe(before), sessionPath: latestSessionPath()
             )
@@ -122,7 +122,7 @@ import OtoLogCore
         if case let .failed(message) = after {
             return ControlResponse(ok: false, error: message, state: Self.describe(after))
         }
-        return ControlResponse(
+        return await ControlResponse(
             ok: after == .recording, state: Self.describe(after), sessionPath: latestSessionPath()
         )
     }
@@ -130,7 +130,7 @@ import OtoLogCore
     func controlStop() async -> ControlResponse {
         let before = await session.state
         guard before == .recording || before == .preparing else {
-            return ControlResponse(
+            return await ControlResponse(
                 ok: false, error: "記録していません",
                 state: Self.describe(before), sessionPath: latestSessionPath()
             )
@@ -164,9 +164,14 @@ import OtoLogCore
         return false
     }
 
-    private func latestSessionPath() -> String? {
-        TranscriptReader(directory: settings.saveDirectory, timeZone: .current)
-            .availableSessions().first?.directoryName
+    /// FS 走査はメインスレッドから外す。保存先が外部ボリュームだと TCC 承認待ちや
+    /// I/O 遅延で open がブロックし、MainActor ごと固まって UI と制御応答が全滅するため
+    private func latestSessionPath() async -> String? {
+        let directory = settings.saveDirectory
+        return await Task.detached(priority: .utility) {
+            TranscriptReader(directory: directory, timeZone: .current)
+                .availableSessions().first?.directoryName
+        }.value
     }
 
     private func apply(_ event: SessionEvent) {
