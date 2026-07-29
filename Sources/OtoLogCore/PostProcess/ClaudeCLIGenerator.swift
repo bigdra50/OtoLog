@@ -11,7 +11,7 @@ public struct ClaudeCLIGenerator: StreamingTextGenerator {
     public init(
         executableURL: URL,
         arguments: [String] = ClaudeCLIGenerator.defaultArguments,
-        timeout: Duration = .seconds(600)
+        timeout: Duration = .seconds(1800) // 補正は入力量に比例して長い。ハングはライブ表示で分かるため保険として長め
     ) {
         self.executableURL = executableURL
         self.arguments = arguments

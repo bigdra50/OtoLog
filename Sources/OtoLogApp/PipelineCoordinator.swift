@@ -71,9 +71,7 @@ import OtoLogCore
                     executableURL: executableURL,
                     arguments: ClaudeCLIGenerator.arguments(
                         model: task.model, allowWebResearch: task.allowsWebResearch
-                    ),
-                    // Web 調査は検索往復のぶん長引くため余裕を持たせる
-                    timeout: task.allowsWebResearch ? .seconds(900) : .seconds(600)
+                    )
                 )
             }
         )
