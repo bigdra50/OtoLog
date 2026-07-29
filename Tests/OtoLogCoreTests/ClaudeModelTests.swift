@@ -9,14 +9,17 @@ struct ClaudeModelTests {
         #expect(ClaudeCLIGenerator.arguments(model: nil, allowWebResearch: false) == [
             "-p", "--output-format", "text", "--tools", "",
             "--no-session-persistence", "--disable-slash-commands",
+            "--settings", #"{"alwaysThinkingEnabled": false}"#,
         ])
         #expect(ClaudeCLIGenerator.arguments(model: .haiku, allowWebResearch: false) == [
             "-p", "--output-format", "text", "--tools", "",
-            "--no-session-persistence", "--disable-slash-commands", "--model", "haiku",
+            "--no-session-persistence", "--disable-slash-commands",
+            "--settings", #"{"alwaysThinkingEnabled": false}"#, "--model", "haiku",
         ])
         #expect(ClaudeCLIGenerator.arguments(model: .sonnet, allowWebResearch: true) == [
             "-p", "--output-format", "text", "--tools", "WebSearch", "WebFetch",
-            "--no-session-persistence", "--disable-slash-commands", "--model", "sonnet",
+            "--no-session-persistence", "--disable-slash-commands",
+            "--settings", #"{"alwaysThinkingEnabled": false}"#, "--model", "sonnet",
         ])
         #expect(ClaudeCLIGenerator.arguments(model: .opus, allowWebResearch: true).contains("opus"))
     }

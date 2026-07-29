@@ -5,12 +5,13 @@ import Testing
 struct ClaudeCLIGeneratorTests {
     // MARK: Internal
 
-    /// 安全フラグの契約: ツール全無効・セッション残さない・スラッシュコマンド無効。
+    /// 安全フラグの契約: ツール全無効・セッション残さない・スラッシュコマンド無効・thinking 無効。
     /// 変更は claude CLI 側の互換確認（mise run test:claude）とセットで行う
     @Test func defaultArgumentsArePinned() {
         #expect(ClaudeCLIGenerator.defaultArguments == [
             "-p", "--output-format", "text", "--tools", "",
             "--no-session-persistence", "--disable-slash-commands",
+            "--settings", #"{"alwaysThinkingEnabled": false}"#,
         ])
     }
 

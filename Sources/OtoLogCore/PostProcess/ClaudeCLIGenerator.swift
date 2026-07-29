@@ -26,10 +26,14 @@ public struct ClaudeCLIGenerator: StreamingTextGenerator {
 
     /// 安全側に倒した既定フラグ。
     /// --tools "" はツール全無効 = ログ由来のプロンプトインジェクションでもテキスト出力しかできない。
-    /// --model は付けずユーザーの CLI 既定に従う。--bare は認証を読まなくなるため使わない
+    /// --model は付けずユーザーの CLI 既定に従う。--bare は認証を読まなくなるため使わない。
+    /// thinking はユーザー設定（alwaysThinkingEnabled）に関わらず明示無効化する:
+    /// thinking が max_tokens 予算を食うと全文書き直し系の本文が1ターンに収まらず、
+    /// 自動継続で所要時間が数倍〜数十倍化する（12分/ターン × 3回+ の実測）
     public static let defaultArguments = [
         "-p", "--output-format", "text", "--tools", "",
         "--no-session-persistence", "--disable-slash-commands",
+        "--settings", #"{"alwaysThinkingEnabled": false}"#,
     ]
 
     public func generate(prompt: String) async throws -> String {
