@@ -291,7 +291,7 @@ public actor PipelineRunner {
         else { return }
         let pairs = CorrectionExtractor.pairs(original: original, corrected: corrected)
         guard !pairs.isEmpty else { return }
-        try? correctionStore.record(pairs, now: now())
+        _ = try? correctionStore.record(pairs, now: now())
     }
 
     /// 実行中タスクのライブ表示。running 以外（完了後の遅延到着）は流さない
