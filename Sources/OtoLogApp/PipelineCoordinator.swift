@@ -19,12 +19,16 @@ import OtoLogCore
     }
 
     /// セッション選択時に、前回実行の状態を meta.json から復元して表示する
-    func loadStates(for session: SessionRef) {
+    func loadStates(for session: SessionRef) async {
         let metaURL = settings.saveDirectory
             .appendingPathComponent(session.directoryName)
             .appendingPathComponent("meta.json")
-        guard let data = try? Data(contentsOf: metaURL),
-              let meta = try? SessionMetaCoder.decode(data),
+        let loaded = await OffMainIO.read { () -> (SessionMeta, [GenerationTemplate])? in
+            guard let data = try? Data(contentsOf: metaURL),
+                  let meta = try? SessionMetaCoder.decode(data) else { return nil }
+            return (meta, TemplateStore().loadTemplates())
+        }
+        guard let (meta, templates) = loaded,
               let playbookID = meta.playbookID,
               let playbook = state.pipelinePlaybooks.first(where: { $0.id == playbookID }),
               let pipeline = meta.pipeline
@@ -32,7 +36,6 @@ import OtoLogCore
             state.pipelineTasks = []
             return
         }
-        let templates = TemplateStore().loadTemplates()
         state.pipelineTasks = playbook.tasks.compactMap { task in
             guard var taskState = pipeline[task.id] else { return nil }
             // アプリ強制終了などで running のまま残った状態は再実行可能な pending として見せる

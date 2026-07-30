@@ -18,11 +18,16 @@ import OtoLogCore
     weak var pipeline: PipelineCoordinator?
 
     /// 生成セクションの展開時に呼ぶ。対象セッションとテンプレートを読み直す
-    func refresh() {
-        state.generationSessions = TranscriptReader(
-            directory: settings.saveDirectory, timeZone: .current
-        ).availableSessions()
-        state.generationTemplates = TemplateStore().loadTemplates()
+    func refresh() async {
+        let directory = settings.saveDirectory
+        let (sessions, templates) = await OffMainIO.read {
+            (
+                TranscriptReader(directory: directory, timeZone: .current).availableSessions(),
+                TemplateStore().loadTemplates()
+            )
+        }
+        state.generationSessions = sessions
+        state.generationTemplates = templates
     }
 
     func generate(session: SessionRef, template: GenerationTemplate) {
@@ -62,7 +67,7 @@ import OtoLogCore
             do {
                 let renamed = try await assigner.assignTitle(to: session)
                 state.generationState = .idle
-                self?.refresh() // リネーム後の一覧へ更新
+                await self?.refresh() // リネーム後の一覧へ更新
                 onSuccess?(renamed)
             } catch is CancellationError {
                 state.generationState = .idle
@@ -75,7 +80,9 @@ import OtoLogCore
     /// 記録停止時のフック。一覧を更新し、設定に応じて自動処理を連鎖する。
     /// タイトル生成が失敗した場合はパイプラインへ連鎖しない（手動で対処する）
     func handleSessionFinished(_ ref: SessionRef) {
-        refresh()
+        Task { [weak self] in
+            await self?.refresh()
+        }
         switch settings.postStopAction {
         case .none:
             break
@@ -89,10 +96,9 @@ import OtoLogCore
     }
 
     /// 未処理（タイトルなし/パイプライン未実行）セッションを検出して表示用状態を更新する
-    func refreshSteward() {
-        state.stewardFindings = SessionSteward(
-            saveDirectory: settings.saveDirectory, timeZone: .current
-        ).findings()
+    func refreshSteward() async {
+        let steward = SessionSteward(saveDirectory: settings.saveDirectory, timeZone: .current)
+        state.stewardFindings = await OffMainIO.read { steward.findings() }
     }
 
     /// 最も新しい未処理セッション1件をフル処理する（タイトル → 自動判定 → パイプライン）。
@@ -104,11 +110,13 @@ import OtoLogCore
                 if finding.needsPipeline {
                     self?.runDefaultPlaybook(session: renamed)
                 }
-                self?.refreshSteward()
+                Task { await self?.refreshSteward() }
             }
         } else if finding.needsPipeline {
             runDefaultPlaybook(session: finding.session)
-            refreshSteward()
+            Task { [weak self] in
+                await self?.refreshSteward()
+            }
         }
     }
 

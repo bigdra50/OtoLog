@@ -14,6 +14,14 @@ struct LibraryDocument: Identifiable {
     }
 }
 
+// MARK: - SessionDetailContent
+
+/// セッション詳細の読み込み結果（meta + 生成物一覧）。
+struct SessionDetailContent {
+    let meta: SessionMeta?
+    let documents: [LibraryDocument]
+}
+
 // MARK: - SessionDetailView
 
 /// セッション詳細: ヘッダ + ドキュメント切替チップ + 本文（文字起こし or 生成物）。
@@ -50,7 +58,34 @@ struct SessionDetailView: View {
                 .help("エディタで開く")
             }
         }
-        .onAppear(perform: reload)
+        .task { await reload() }
+    }
+
+    /// meta と生成物一覧（テンプレート定義順 → 名前順）を組み立てる。
+    /// 保存先を読むので MainActor では呼ばない
+    nonisolated static func load(
+        directory: URL, session: SessionRef, timeZone: TimeZone = .current
+    ) -> SessionDetailContent {
+        let reader = TranscriptReader(directory: directory, timeZone: timeZone)
+        let templates = TemplateStore().loadTemplates()
+        let templateOrder = Dictionary(
+            uniqueKeysWithValues: templates.enumerated().map { ($0.element.id, $0.offset) }
+        )
+        let documents = reader.generatedDocumentFileNames(in: session)
+            .filter { $0 != "correct.md" } // 補正は文字起こしタブに統合（補正後/原文/差分の切替）
+            .map { fileName in
+                let templateID = String(fileName.dropLast(".md".count))
+                return LibraryDocument(
+                    fileName: fileName,
+                    displayName: templates.first { $0.id == templateID }?.displayName ?? templateID
+                )
+            }
+            .sorted { lhs, rhs in
+                let lhsOrder = templateOrder[String(lhs.fileName.dropLast(3))] ?? Int.max
+                let rhsOrder = templateOrder[String(rhs.fileName.dropLast(3))] ?? Int.max
+                return lhsOrder != rhsOrder ? lhsOrder < rhsOrder : lhs.fileName < rhs.fileName
+            }
+        return SessionDetailContent(meta: reader.meta(in: session), documents: documents)
     }
 
     // MARK: Private
@@ -142,27 +177,11 @@ struct SessionDetailView: View {
         .buttonStyle(.plain)
     }
 
-    private func reload() {
-        let reader = TranscriptReader(directory: settings.saveDirectory, timeZone: .current)
-        meta = reader.meta(in: session)
-
-        let templates = TemplateStore().loadTemplates()
-        let templateOrder = Dictionary(
-            uniqueKeysWithValues: templates.enumerated().map { ($0.element.id, $0.offset) }
-        )
-        documents = reader.generatedDocumentFileNames(in: session)
-            .filter { $0 != "correct.md" } // 補正は文字起こしタブに統合（補正後/原文/差分の切替）
-            .map { fileName in
-                let templateID = String(fileName.dropLast(".md".count))
-                return LibraryDocument(
-                    fileName: fileName,
-                    displayName: templates.first { $0.id == templateID }?.displayName ?? templateID
-                )
-            }
-            .sorted { lhs, rhs in
-                let lhsOrder = templateOrder[String(lhs.fileName.dropLast(3))] ?? Int.max
-                let rhsOrder = templateOrder[String(rhs.fileName.dropLast(3))] ?? Int.max
-                return lhsOrder != rhsOrder ? lhsOrder < rhsOrder : lhs.fileName < rhs.fileName
-            }
+    private func reload() async {
+        let directory = settings.saveDirectory
+        let session = session
+        let loaded = await OffMainIO.read { Self.load(directory: directory, session: session) }
+        meta = loaded.meta
+        documents = loaded.documents
     }
 }

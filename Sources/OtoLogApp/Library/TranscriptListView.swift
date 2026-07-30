@@ -1,6 +1,17 @@
 import OtoLogCore
 import SwiftUI
 
+// MARK: - TranscriptContent
+
+/// 文字起こしタブの読み込み結果（原文・補正・変更行差分）。
+struct TranscriptContent: Equatable {
+    var originalLines: [TimestampedLogParser.Line] = []
+    var correctedLines: [TimestampedLogParser.Line]?
+    var diffEntries: [TranscriptDiff.Entry] = []
+}
+
+// MARK: - TranscriptListView
+
 /// 文字起こしビュー。補正結果（correct.md）があればそれを主役として表示し、
 /// 「原文 / 差分」へ切り替えられる。差分は変更行だけを文字単位ハイライトで見せる
 /// （補正が正しければ原文を見る機会はほぼなく、違和感のある箇所だけ確認する導線）。
@@ -28,7 +39,37 @@ struct TranscriptListView: View {
                 content
             }
         }
-        .onAppear(perform: reload)
+        .task { await reload() }
+    }
+
+    /// 原文と補正（correct.md）を読み、突合用の正規化と差分抽出まで行う。
+    /// 保存先を読むので MainActor では呼ばない
+    nonisolated static func load(
+        directory: URL, session: SessionRef, timeZone: TimeZone = .current
+    ) -> TranscriptContent {
+        let reader = TranscriptReader(directory: directory, timeZone: timeZone)
+        let segments = (try? reader.segments(in: session)) ?? []
+        var content = TranscriptContent()
+        // 補正側（collapse 済み）と突合できるよう、原文も同じ正規化で1行化する
+        content.originalLines = segments.map { segment in
+            TimestampedLogParser.Line(
+                time: timeText(segment.finalizedAt, timeZone: timeZone),
+                text: segment.text.components(separatedBy: .whitespacesAndNewlines)
+                    .filter { !$0.isEmpty }
+                    .joined(separator: " ")
+            )
+        }
+        let correctURL = directory
+            .appendingPathComponent(session.directoryName)
+            .appendingPathComponent("correct.md")
+        if let raw = try? String(contentsOf: correctURL, encoding: .utf8),
+           let lines = TimestampedLogParser.parse(PostProcessRunner.stripProvenanceHeader(raw)) {
+            content.correctedLines = lines
+            content.diffEntries = TranscriptDiff.changedEntries(
+                original: content.originalLines, corrected: lines
+            )
+        }
+        return content
     }
 
     // MARK: Private
@@ -91,6 +132,14 @@ struct TranscriptListView: View {
         }
     }
 
+    private nonisolated static func timeText(_ date: Date, timeZone: TimeZone) -> String {
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.timeZone = timeZone
+        formatter.dateFormat = "HH:mm:ss"
+        return formatter.string(from: date)
+    }
+
     private func diffText(_ segments: [CharacterDiff.Segment]) -> AttributedString {
         var result = AttributedString()
         for segment in segments {
@@ -110,39 +159,13 @@ struct TranscriptListView: View {
         return result
     }
 
-    private func reload() {
-        let reader = TranscriptReader(directory: settings.saveDirectory, timeZone: .current)
-        let segments = (try? reader.segments(in: session)) ?? []
-        // 補正側（collapse 済み）と突合できるよう、原文も同じ正規化で1行化する
-        originalLines = segments.map { segment in
-            TimestampedLogParser.Line(
-                time: timeText(segment.finalizedAt),
-                text: segment.text.components(separatedBy: .whitespacesAndNewlines)
-                    .filter { !$0.isEmpty }
-                    .joined(separator: " ")
-            )
-        }
-
-        let correctURL = settings.saveDirectory
-            .appendingPathComponent(session.directoryName)
-            .appendingPathComponent("correct.md")
-        if let raw = try? String(contentsOf: correctURL, encoding: .utf8),
-           let lines = TimestampedLogParser.parse(PostProcessRunner.stripProvenanceHeader(raw)) {
-            correctedLines = lines
-            diffEntries = TranscriptDiff.changedEntries(original: originalLines, corrected: lines)
-            mode = .corrected
-        } else {
-            correctedLines = nil
-            diffEntries = []
-            mode = .original
-        }
-    }
-
-    private func timeText(_ date: Date) -> String {
-        let formatter = DateFormatter()
-        formatter.locale = Locale(identifier: "en_US_POSIX")
-        formatter.timeZone = .current
-        formatter.dateFormat = "HH:mm:ss"
-        return formatter.string(from: date)
+    private func reload() async {
+        let directory = settings.saveDirectory
+        let session = session
+        let loaded = await OffMainIO.read { Self.load(directory: directory, session: session) }
+        originalLines = loaded.originalLines
+        correctedLines = loaded.correctedLines
+        diffEntries = loaded.diffEntries
+        mode = loaded.correctedLines != nil ? .corrected : .original
     }
 }

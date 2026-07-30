@@ -24,6 +24,6 @@ let package = Package(
         .executableTarget(name: "otolog-devtool", dependencies: ["OtoLogCore"]),
         .testTarget(name: "OtoLogCoreTests", dependencies: ["OtoLogCore"]),
         // UI 層のレイアウト検証。ポップオーバーの実寸はホスティングして測るしかないため
-        .testTarget(name: "OtoLogAppTests", dependencies: ["OtoLogApp"]),
+        .testTarget(name: "OtoLogAppTests", dependencies: ["OtoLogApp", "OtoLogCore"]),
     ]
 )

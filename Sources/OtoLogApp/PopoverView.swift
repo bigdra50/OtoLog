@@ -49,7 +49,7 @@ struct PopoverView: View {
         // 中身が短くても余白が出たり、逆に切り詰められたりする。
         // 画面からのはみ出しは AppKit 側（StatusItemController）で面倒を見る
         stack
-            .onAppear { generation.refreshSteward() }
+            .task { await generation.refreshSteward() }
     }
 
     // MARK: Private
@@ -273,7 +273,7 @@ struct PopoverView: View {
         }
         .onChange(of: selectedSessionID) { _, _ in
             if let session = selectedSession {
-                pipeline.loadStates(for: session)
+                Task { await pipeline.loadStates(for: session) }
             }
         }
     }
@@ -431,17 +431,21 @@ struct PopoverView: View {
     private func toggleGeneration() {
         showsGeneration.toggle()
         guard showsGeneration else { return }
-        generation.refresh()
         pipeline.refresh()
-        reconcileSelection(with: state.generationSessions)
-        if selectedTemplateID.isEmpty || !state.generationTemplates.contains(where: { $0.id == selectedTemplateID }) {
-            selectedTemplateID = state.generationTemplates.first?.id ?? ""
-        }
         if selectedPlaybookID.isEmpty || !state.pipelinePlaybooks.contains(where: { $0.id == selectedPlaybookID }) {
             selectedPlaybookID = state.pipelinePlaybooks.first?.id ?? ""
         }
-        if let session = selectedSession {
-            pipeline.loadStates(for: session)
+        // 保存先の走査は MainActor から外れて非同期に終わるため、
+        // セッション・テンプレートの選択合わせは読み込み完了後に行う
+        Task {
+            await generation.refresh()
+            reconcileSelection(with: state.generationSessions)
+            if selectedTemplateID.isEmpty || !state.generationTemplates.contains(where: { $0.id == selectedTemplateID }) {
+                selectedTemplateID = state.generationTemplates.first?.id ?? ""
+            }
+            if let session = selectedSession {
+                await pipeline.loadStates(for: session)
+            }
         }
     }
 

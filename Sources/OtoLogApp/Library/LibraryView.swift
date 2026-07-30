@@ -47,13 +47,21 @@ struct LibraryView: View {
             // タイトル生成のリネームや新しい記録を、ウィンドウを開いたまま反映する
             ToolbarItem {
                 Button {
-                    reload()
+                    Task { await reload() }
                 } label: {
                     Label("更新", systemImage: "arrow.clockwise")
                 }
             }
         }
-        .onAppear(perform: reload)
+        .task { await reload() }
+    }
+
+    /// セッション列挙 + meta 付与。保存先を読むので MainActor では呼ばない
+    nonisolated static func loadRows(directory: URL, timeZone: TimeZone = .current) -> [LibrarySessionRow] {
+        let reader = TranscriptReader(directory: directory, timeZone: timeZone)
+        return reader.availableSessions().map { session in
+            LibrarySessionRow(session: session, meta: reader.meta(in: session))
+        }
     }
 
     // MARK: Private
@@ -92,11 +100,9 @@ struct LibraryView: View {
         return text
     }
 
-    private func reload() {
-        let reader = TranscriptReader(directory: settings.saveDirectory, timeZone: .current)
-        rows = reader.availableSessions().map { session in
-            LibrarySessionRow(session: session, meta: reader.meta(in: session))
-        }
+    private func reload() async {
+        let directory = settings.saveDirectory
+        rows = await OffMainIO.read { Self.loadRows(directory: directory) }
         if selectedID == nil || !rows.contains(where: { $0.id == selectedID }) {
             selectedID = rows.first?.id
         }

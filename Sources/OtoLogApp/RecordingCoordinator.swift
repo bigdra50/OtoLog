@@ -56,15 +56,21 @@ import OtoLogCore
 
     /// 最新セッションの transcript.md を開く。セッションが無ければ保存フォルダを開く
     func openLatestSession() {
-        let reader = TranscriptReader(directory: settings.saveDirectory, timeZone: .current)
-        guard let latest = reader.availableSessions().first else {
-            openSaveFolder()
-            return
+        let directory = settings.saveDirectory
+        Task { [weak self] in
+            let target = await OffMainIO.read { () -> URL? in
+                let reader = TranscriptReader(directory: directory, timeZone: .current)
+                guard let latest = reader.availableSessions().first else { return nil }
+                let sessionDir = directory.appendingPathComponent(latest.directoryName)
+                let markdown = sessionDir.appendingPathComponent("transcript.md")
+                return FileManager.default.fileExists(atPath: markdown.path) ? markdown : sessionDir
+            }
+            if let target {
+                NSWorkspace.shared.open(target)
+            } else {
+                self?.openSaveFolder()
+            }
         }
-        let sessionDir = settings.saveDirectory.appendingPathComponent(latest.directoryName)
-        let markdown = sessionDir.appendingPathComponent("transcript.md")
-        let target = FileManager.default.fileExists(atPath: markdown.path) ? markdown : sessionDir
-        NSWorkspace.shared.open(target)
     }
 
     /// 記録の保存フォルダを開く
@@ -164,14 +170,13 @@ import OtoLogCore
         return false
     }
 
-    /// FS 走査はメインスレッドから外す。保存先が外部ボリュームだと TCC 承認待ちや
-    /// I/O 遅延で open がブロックし、MainActor ごと固まって UI と制御応答が全滅するため
+    /// 制御応答は自動化経路のため utility で足りる
     private func latestSessionPath() async -> String? {
         let directory = settings.saveDirectory
-        return await Task.detached(priority: .utility) {
+        return await OffMainIO.read(priority: .utility) {
             TranscriptReader(directory: directory, timeZone: .current)
                 .availableSessions().first?.directoryName
-        }.value
+        }
     }
 
     private func apply(_ event: SessionEvent) {
