@@ -26,8 +26,9 @@ enum PostStopAction: String, CaseIterable {
 @MainActor @Observable final class AppSettings {
     // MARK: Lifecycle
 
-    init() {
-        let defaults = UserDefaults.standard
+    /// defaults は差し替え可能。テストが実利用中の保存先を書き換えないようにするため
+    init(defaults: UserDefaults = .standard) {
+        self.defaults = defaults
         localeIdentifier = defaults.string(forKey: Self.localeKey) ?? "ja-JP"
         saveDirectoryPath = defaults.string(forKey: Self.directoryKey) ?? "~/Documents/OtoLog"
         claudeExecutablePath = defaults.string(forKey: Self.claudePathKey) ?? "~/.local/bin/claude"
@@ -42,26 +43,26 @@ enum PostStopAction: String, CaseIterable {
     static let autoPlaybookID = "auto"
 
     var localeIdentifier: String {
-        didSet { UserDefaults.standard.set(localeIdentifier, forKey: Self.localeKey) }
+        didSet { defaults.set(localeIdentifier, forKey: Self.localeKey) }
     }
 
     /// チルダ表記で保持し、表示にもそのまま使う
     var saveDirectoryPath: String {
-        didSet { UserDefaults.standard.set(saveDirectoryPath, forKey: Self.directoryKey) }
+        didSet { defaults.set(saveDirectoryPath, forKey: Self.directoryKey) }
     }
 
     /// チルダ表記で保持し、表示にもそのまま使う
     var claudeExecutablePath: String {
-        didSet { UserDefaults.standard.set(claudeExecutablePath, forKey: Self.claudePathKey) }
+        didSet { defaults.set(claudeExecutablePath, forKey: Self.claudePathKey) }
     }
 
     var postStopAction: PostStopAction {
-        didSet { UserDefaults.standard.set(postStopAction.rawValue, forKey: Self.postStopKey) }
+        didSet { defaults.set(postStopAction.rawValue, forKey: Self.postStopKey) }
     }
 
     /// 停止時の自動実行で使うプレイブック（autoPlaybookID なら内容から自動判定）
     var defaultPlaybookID: String {
-        didSet { UserDefaults.standard.set(defaultPlaybookID, forKey: Self.defaultPlaybookKey) }
+        didSet { defaults.set(defaultPlaybookID, forKey: Self.defaultPlaybookKey) }
     }
 
     var saveDirectory: URL {
@@ -79,4 +80,6 @@ enum PostStopAction: String, CaseIterable {
     private static let claudePathKey = "claudeExecutablePath"
     private static let postStopKey = "postStopAction"
     private static let defaultPlaybookKey = "defaultPlaybookID"
+
+    private let defaults: UserDefaults
 }

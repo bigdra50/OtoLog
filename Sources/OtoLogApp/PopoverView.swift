@@ -3,7 +3,38 @@ import SwiftUI
 
 /// ポップオーバーの中身。表示と操作の転送のみでロジックは持たない。
 struct PopoverView: View {
+    // MARK: Lifecycle
+
+    /// showsGeneration / showsSettings は展開状態の初期値。
+    /// 最も背が高くなる組み合わせをレイアウト検証から再現できるようにするため外から与える
+    init(
+        state: AppState,
+        settings: AppSettings,
+        coordinator: RecordingCoordinator,
+        generation: GenerationCoordinator,
+        pipeline: PipelineCoordinator,
+        openLibrary: @escaping () -> Void,
+        showsGeneration: Bool = false,
+        showsSettings: Bool = false,
+        generationMode: GenerationMode = .single
+    ) {
+        self.state = state
+        self.settings = settings
+        self.coordinator = coordinator
+        self.generation = generation
+        self.pipeline = pipeline
+        self.openLibrary = openLibrary
+        _showsGeneration = State(initialValue: showsGeneration)
+        _showsSettings = State(initialValue: showsSettings)
+        _generationMode = State(initialValue: generationMode)
+    }
+
     // MARK: Internal
+
+    enum GenerationMode {
+        case single
+        case playbook
+    }
 
     let state: AppState
     let settings: AppSettings
@@ -13,23 +44,15 @@ struct PopoverView: View {
     let openLibrary: () -> Void
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            header
-            content
-            Divider()
-            footer
-        }
-        .padding(16)
-        .frame(width: 340)
-        .onAppear { generation.refreshSteward() }
+        // 高さは中身のなりゆきに任せる。NSPopover は提案サイズを与えないため、
+        // ここで maxHeight や ScrollView を挟むと SwiftUI 側が高さを決めきれず
+        // 中身が短くても余白が出たり、逆に切り詰められたりする。
+        // 画面からのはみ出しは AppKit 側（StatusItemController）で面倒を見る
+        stack
+            .onAppear { generation.refreshSteward() }
     }
 
     // MARK: Private
-
-    private enum GenerationMode {
-        case single
-        case playbook
-    }
 
     @State private var showsSettings = false
     @State private var showsGeneration = false
@@ -68,6 +91,17 @@ struct PopoverView: View {
 
     private var selectedSession: SessionRef? {
         state.generationSessions.first { $0.id == selectedSessionID }
+    }
+
+    private var stack: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            header
+            content
+            Divider()
+            footer
+        }
+        .padding(16)
+        .frame(width: PopoverMetrics.width)
     }
 
     private var header: some View {
