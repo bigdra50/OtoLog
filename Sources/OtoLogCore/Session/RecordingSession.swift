@@ -1,6 +1,8 @@
 @preconcurrency import AVFAudio
 import Foundation
 
+// MARK: - RecordingSession
+
 /// パイプライン統括。キャプチャ → エンジン → ストアを束ね、UI へ SessionEvent を流す。
 ///
 /// チャンクはエンジンへ直結せずセッションが中継する。
@@ -13,6 +15,7 @@ public actor RecordingSession {
         capture: any AudioCaptureSource,
         engine: any TranscriptionEngine,
         store: any TranscriptStore,
+        translationTimeout: Duration = .seconds(10),
         source: AudioSourceKind = .system,
         now: @escaping @Sendable () -> Date = { Date() },
         makeSessionID: @escaping @Sendable () -> UUID = { UUID() }
@@ -20,6 +23,7 @@ public actor RecordingSession {
         self.capture = capture
         self.engine = engine
         self.store = store
+        self.translationTimeout = translationTimeout
         self.source = source
         self.now = now
         self.makeSessionID = makeSessionID
@@ -35,9 +39,12 @@ public actor RecordingSession {
 
     public private(set) var state: SessionState = .idle
 
-    public func start(locale: Locale) async {
+    /// translator は記録セッション単位の設定。nil なら訳さない
+    /// （翻訳先が認識言語と同じときも生成側が nil を返す）
+    public func start(locale: Locale, translator: (any Translator)? = nil) async {
         guard canStart else { return }
         cleanUpPreviousRun()
+        self.translator = translator
         setState(.preparing)
 
         let continuation = eventContinuation
@@ -110,11 +117,14 @@ public actor RecordingSession {
     private let capture: any AudioCaptureSource
     private let engine: any TranscriptionEngine
     private let store: any TranscriptStore
+    private let translationTimeout: Duration
     private let source: AudioSourceKind
     private let now: @Sendable () -> Date
     private let makeSessionID: @Sendable () -> UUID
     private nonisolated let eventContinuation: AsyncStream<SessionEvent>.Continuation
 
+    /// start で受け取った翻訳器。記録中は差し替わらない
+    private var translator: (any Translator)?
     private var currentContext: TranscriptionContext?
     private var analyzerFormat: AVAudioFormat?
     private var chunkContinuation: AsyncThrowingStream<AudioChunk, any Error>.Continuation?
@@ -201,6 +211,7 @@ public actor RecordingSession {
         case let .volatile(text):
             eventContinuation.yield(.liveTranscript(text))
         case let .finalized(segment):
+            let segment = await translated(segment)
             do {
                 try await store.append(segment)
                 eventContinuation.yield(.segmentRecorded(segment))
@@ -211,9 +222,53 @@ public actor RecordingSession {
         }
     }
 
+    /// 訳を載せて返す。翻訳器が無い・失敗・時間切れのときは原文のまま返し、記録は止めない
+    private func translated(_ segment: TranscriptSegment) async -> TranscriptSegment {
+        guard let translator else { return segment }
+        do {
+            let text = segment.text
+            let result = try await withTimeout(translationTimeout) {
+                try await translator.translate(text)
+            }
+            var translated = segment
+            translated.translation = result.text
+            translated.translationLocale = result.locale
+            return translated
+        } catch {
+            eventContinuation.yield(.translationError(error.localizedDescription))
+            return segment
+        }
+    }
+
     private func engineFailed(_ error: any Error) {
         if state == .recording {
             setState(.failed(error.localizedDescription))
         }
+    }
+}
+
+// MARK: - TranslationTimeout
+
+private struct TranslationTimeout: Error, LocalizedError {
+    var errorDescription: String? {
+        "翻訳が時間内に完了しませんでした。"
+    }
+}
+
+/// duration 内に終わらなければ打ち切る。翻訳がハングしても確定セグメントの保存を止めないため。
+/// 打ち切り後に翻訳が完了しても結果は捨てられる（group を抜けるときにキャンセルされる）
+private func withTimeout<T: Sendable>(
+    _ duration: Duration,
+    operation: @escaping @Sendable () async throws -> T
+) async throws -> T {
+    try await withThrowingTaskGroup(of: T.self) { group in
+        group.addTask { try await operation() }
+        group.addTask {
+            try await Task.sleep(for: duration)
+            throw TranslationTimeout()
+        }
+        defer { group.cancelAll() }
+        guard let result = try await group.next() else { throw TranslationTimeout() }
+        return result
     }
 }

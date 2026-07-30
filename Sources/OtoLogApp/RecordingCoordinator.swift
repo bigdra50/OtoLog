@@ -6,11 +6,18 @@ import OtoLogCore
 @MainActor final class RecordingCoordinator {
     // MARK: Lifecycle
 
-    init(session: RecordingSession, store: SessionFileStore, state: AppState, settings: AppSettings) {
+    init(
+        session: RecordingSession,
+        store: SessionFileStore,
+        state: AppState,
+        settings: AppSettings,
+        overlay: SubtitleOverlayController = SubtitleOverlayController()
+    ) {
         self.session = session
         self.store = store
         self.state = state
         self.settings = settings
+        self.overlay = overlay
     }
 
     // MARK: Internal
@@ -39,11 +46,12 @@ import OtoLogCore
 
     func toggle() {
         let locale = Locale(identifier: settings.localeIdentifier)
+        let translator = makeTranslator()
         Task { [session, state] in
             if state.isRecording {
                 await session.stop()
             } else {
-                await session.start(locale: locale)
+                await session.start(locale: locale, translator: translator)
             }
         }
     }
@@ -123,7 +131,10 @@ import OtoLogCore
                 state: Self.describe(before), sessionPath: latestSessionPath()
             )
         }
-        await session.start(locale: Locale(identifier: settings.localeIdentifier))
+        await session.start(
+            locale: Locale(identifier: settings.localeIdentifier),
+            translator: makeTranslator()
+        )
         let after = await session.state
         if case let .failed(message) = after {
             return ControlResponse(ok: false, error: message, state: Self.describe(after))
@@ -153,6 +164,7 @@ import OtoLogCore
     private let store: SessionFileStore
     private let state: AppState
     private let settings: AppSettings
+    private let overlay: SubtitleOverlayController
     private var eventTask: Task<Void, Never>?
 
     private static func describe(_ state: SessionState) -> String {
@@ -170,6 +182,16 @@ import OtoLogCore
         return false
     }
 
+    /// 翻訳オフ、または翻訳先が認識言語と同じなら nil（訳さない）。
+    /// 記録の開始ごとに作り、設定変更は次の記録から反映される
+    private func makeTranslator() -> (any Translator)? {
+        guard settings.translationEnabled else { return nil }
+        return AppleTranslator(
+            sourceLocale: settings.localeIdentifier,
+            targetLocale: settings.resolvedTranslationTarget
+        )
+    }
+
     /// 制御応答は自動化経路のため utility で足りる
     private func latestSessionPath() async -> String? {
         let directory = settings.saveDirectory
@@ -185,9 +207,13 @@ import OtoLogCore
             state.sessionState = sessionState
             if sessionState == .recording {
                 state.storeErrorMessage = nil
+                state.translationErrorMessage = nil
             }
             if sessionState == .idle {
                 state.liveText = ""
+            }
+            if sessionState != .recording {
+                overlay.hide()
             }
         case let .preparationProgress(progress):
             state.preparationProgress = progress
@@ -195,9 +221,15 @@ import OtoLogCore
             state.liveText = text
         case let .segmentRecorded(segment):
             state.lastSegmentText = segment.text
+            state.lastSegmentTranslation = segment.translation ?? ""
             state.liveText = ""
+            if let translation = segment.translation, settings.subtitleOverlayEnabled {
+                overlay.update(original: segment.text, translation: translation)
+            }
         case let .storeError(message):
             state.storeErrorMessage = message
+        case let .translationError(message):
+            state.translationErrorMessage = message
         case let .sessionFinished(ref):
             onSessionFinished?(ref)
         }

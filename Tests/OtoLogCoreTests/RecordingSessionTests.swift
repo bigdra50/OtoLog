@@ -172,6 +172,66 @@ struct RecordingSessionTests {
         #expect(await eventually { await sut.store.segments == [recovered] })
     }
 
+    // MARK: 翻訳
+
+    /// 訳はセグメントへ載せてから保存する。ストアには訳つきの1件だけが渡る
+    @Test func translatesFinalizedSegmentBeforeStoring() async throws {
+        let translator = FakeTranslator()
+        translator.result = .success(TranslatedText(text: "Hello", locale: "en-US"))
+        let sut = await makeStartedSUT(translator: translator)
+
+        sut.engine.send(.finalized(TestFixtures.segment(text: "こんにちは")))
+
+        #expect(await eventually { await sut.store.segments.count == 1 })
+        let stored = try #require(await sut.store.segments.first)
+        #expect(stored.translation == "Hello")
+        #expect(stored.translationLocale == "en-US")
+        #expect(translator.receivedTexts == ["こんにちは"])
+        // UI（ライブ字幕・オーバーレイ）は保存済みイベントから訳を受け取る。
+        // イベントの購読は別タスクなので、保存完了と同時に届いているとは限らない
+        #expect(await eventually { sut.collector.events.contains(.segmentRecorded(stored)) })
+    }
+
+    /// 翻訳が失敗しても記録は止めない。原文だけ保存し、UI へは別途通知する
+    @Test func keepsRecordingWhenTranslationFails() async throws {
+        let translator = FakeTranslator()
+        translator.result = .failure(Boom())
+        let sut = await makeStartedSUT(translator: translator)
+
+        sut.engine.send(.finalized(TestFixtures.segment(text: "こんにちは")))
+
+        #expect(await eventually { await sut.store.segments.count == 1 })
+        let stored = try #require(await sut.store.segments.first)
+        #expect(stored.translation == nil)
+        #expect(await eventually {
+            sut.collector.events.contains { if case .translationError = $0 { true } else { false } }
+        })
+        #expect(await sut.session.state == .recording)
+    }
+
+    /// 翻訳が返らないときも保存は進む。記録を翻訳の人質にしない
+    @Test func storesOriginalWhenTranslationTimesOut() async {
+        let translator = FakeTranslator()
+        translator.delay = .seconds(60)
+        let sut = await makeStartedSUT(translator: translator, translationTimeout: .milliseconds(50))
+
+        sut.engine.send(.finalized(TestFixtures.segment(text: "こんにちは")))
+
+        #expect(await eventually { await sut.store.segments.count == 1 })
+        #expect(await sut.store.segments.first?.translation == nil)
+        #expect(await sut.session.state == .recording)
+    }
+
+    /// 翻訳器が無ければ従来どおり原文だけが流れる
+    @Test func storesOriginalWhenTranslatorIsAbsent() async {
+        let sut = await makeStartedSUT()
+
+        sut.engine.send(.finalized(TestFixtures.segment(text: "こんにちは")))
+
+        #expect(await eventually { await sut.store.segments.count == 1 })
+        #expect(await sut.store.segments.first?.translation == nil)
+    }
+
     // MARK: Private
 
     private struct SUT {
@@ -188,13 +248,15 @@ struct RecordingSessionTests {
 
     private func makeSUT(
         now: @escaping @Sendable () -> Date = { Date() },
-        makeSessionID: @escaping @Sendable () -> UUID = { UUID() }
+        makeSessionID: @escaping @Sendable () -> UUID = { UUID() },
+        translationTimeout: Duration = .seconds(10)
     ) -> SUT {
         let capture = FakeCaptureSource()
         let engine = FakeTranscriptionEngine()
         let store = SpyStore()
         let session = RecordingSession(
             capture: capture, engine: engine, store: store,
+            translationTimeout: translationTimeout,
             now: now, makeSessionID: makeSessionID
         )
         let collector = EventCollector()
@@ -203,10 +265,12 @@ struct RecordingSessionTests {
     }
 
     private func makeStartedSUT(
-        now: @escaping @Sendable () -> Date = { Date() }
+        now: @escaping @Sendable () -> Date = { Date() },
+        translator: (any Translator)? = nil,
+        translationTimeout: Duration = .seconds(10)
     ) async -> SUT {
-        let sut = makeSUT(now: now)
-        await sut.session.start(locale: ja)
+        let sut = makeSUT(now: now, translationTimeout: translationTimeout)
+        await sut.session.start(locale: ja, translator: translator)
         _ = await eventually { await sut.session.state == .recording }
         return sut
     }

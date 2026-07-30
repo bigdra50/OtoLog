@@ -15,19 +15,28 @@ public struct MarkdownFormatter: Sendable {
         "# \(stem)\n\n"
     }
 
-    /// 1セグメント1行を守るため改行と連続空白は空白1個に潰す。空になったら nil（書かない）
+    /// 1セグメント1行を守るため改行と連続空白は空白1個に潰す。空になったら nil（書かない）。
+    /// 訳があるときは原文の子行として続ける（原文を正本に残したまま訳を読めるようにする）
     public func line(for segment: TranscriptSegment) -> String? {
-        let squashed = segment.text
-            .components(separatedBy: .whitespacesAndNewlines)
-            .filter { !$0.isEmpty }
-            .joined(separator: " ")
-        guard !squashed.isEmpty else { return nil }
-        return "- **\(timeString(from: segment.finalizedAt))** \(squashed)\n"
+        guard let squashed = Self.squash(segment.text) else { return nil }
+        var line = "- **\(timeString(from: segment.finalizedAt))** \(squashed)\n"
+        if let translation = segment.translation.flatMap(Self.squash) {
+            line += "  - \(translation)\n"
+        }
+        return line
     }
 
     // MARK: Private
 
     private let timeZone: TimeZone
+
+    private static func squash(_ text: String) -> String? {
+        let squashed = text
+            .components(separatedBy: .whitespacesAndNewlines)
+            .filter { !$0.isEmpty }
+            .joined(separator: " ")
+        return squashed.isEmpty ? nil : squashed
+    }
 
     /// DateFormatter は Sendable でないため共有せず毎回生成する
     private func timeString(from date: Date) -> String {

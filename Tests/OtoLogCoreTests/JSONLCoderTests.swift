@@ -36,6 +36,34 @@ struct JSONLCoderTests {
         #expect(decoded.text == "1行目\n\"引用\"付き")
     }
 
+    /// 訳は後から入った項目。持たない旧 jsonl もそのまま読める
+    @Test func decodesLegacyLineWithoutTranslation() throws {
+        let legacy = #"{"audioEnd":3.25,"audioStart":1.5,"finalizedAt":"2026-07-29T04:00:00.500Z","locale":"ja-JP","sessionID":"00000000-0000-0000-0000-000000000001","sessionStartedAt":"2026-07-29T03:59:00.000Z","source":"system","text":"こんにちは"}"#
+
+        let decoded = try JSONLCoder.decodeLine(legacy)
+
+        #expect(decoded == segment)
+        #expect(decoded.translation == nil)
+        #expect(decoded.translationLocale == nil)
+    }
+
+    @Test func roundTripsTranslation() throws {
+        var translated = segment
+        translated.translation = "Hello"
+        translated.translationLocale = "en-US"
+
+        let line = try JSONLCoder.encodeLine(translated)
+
+        #expect(line.contains(#""translation":"Hello""#))
+        #expect(try JSONLCoder.decodeLine(line) == translated)
+    }
+
+    /// 翻訳オフのセッションでは行に項目自体が出ない
+    @Test func omitsTranslationWhenAbsent() throws {
+        let line = try JSONLCoder.encodeLine(segment)
+        #expect(!line.contains("translation"))
+    }
+
     @Test func omitsNilAudioRange() throws {
         var noRange = segment
         noRange.audioStart = nil

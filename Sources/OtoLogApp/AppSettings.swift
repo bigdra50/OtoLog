@@ -35,12 +35,20 @@ enum PostStopAction: String, CaseIterable {
         postStopAction = defaults.string(forKey: Self.postStopKey)
             .flatMap(PostStopAction.init(rawValue:)) ?? .none
         defaultPlaybookID = defaults.string(forKey: Self.defaultPlaybookKey) ?? Self.autoPlaybookID
+        translationEnabled = defaults.bool(forKey: Self.translationEnabledKey)
+        translationTargetIdentifier = defaults.string(forKey: Self.translationTargetKey)
+            ?? Self.systemTranslationTarget
+        // bool(forKey:) は未設定でも false になるため、既定 true は object の有無で判定する
+        subtitleOverlayEnabled = defaults.object(forKey: Self.subtitleOverlayKey) as? Bool ?? true
     }
 
     // MARK: Internal
 
     /// 「内容から自動判定」を表す予約値（プレイブック id には使えない）
     static let autoPlaybookID = "auto"
+
+    /// 「システム設定に従う」を表す予約値（BCP-47 と衝突しない）
+    static let systemTranslationTarget = "system"
 
     var localeIdentifier: String {
         didSet { defaults.set(localeIdentifier, forKey: Self.localeKey) }
@@ -65,6 +73,31 @@ enum PostStopAction: String, CaseIterable {
         didSet { defaults.set(defaultPlaybookID, forKey: Self.defaultPlaybookKey) }
     }
 
+    /// 記録中に確定セグメントを訳すか。既存の記録の挙動を変えないよう既定はオフ
+    var translationEnabled: Bool {
+        didSet { defaults.set(translationEnabled, forKey: Self.translationEnabledKey) }
+    }
+
+    /// systemTranslationTarget か BCP-47
+    var translationTargetIdentifier: String {
+        didSet { defaults.set(translationTargetIdentifier, forKey: Self.translationTargetKey) }
+    }
+
+    /// 記録中に訳を画面へ重ねる。翻訳が有効なときだけ効く
+    var subtitleOverlayEnabled: Bool {
+        didSet { defaults.set(subtitleOverlayEnabled, forKey: Self.subtitleOverlayKey) }
+    }
+
+    /// 実際に翻訳先として渡す BCP-47。
+    /// システム既定は supportedLanguages に無い組み合わせ（en-Latn-JP 等）になり得るが、
+    /// 正規化せず framework の解決に委ねる。言語コードで候補へ寄せ直すと
+    /// 別地域（en-Latn-IN 等）を掴んで訳文が劣化する
+    var resolvedTranslationTarget: String {
+        translationTargetIdentifier == Self.systemTranslationTarget
+            ? Locale.current.language.maximalIdentifier
+            : translationTargetIdentifier
+    }
+
     var saveDirectory: URL {
         URL(fileURLWithPath: (saveDirectoryPath as NSString).expandingTildeInPath, isDirectory: true)
     }
@@ -80,6 +113,9 @@ enum PostStopAction: String, CaseIterable {
     private static let claudePathKey = "claudeExecutablePath"
     private static let postStopKey = "postStopAction"
     private static let defaultPlaybookKey = "defaultPlaybookID"
+    private static let translationEnabledKey = "translationEnabled"
+    private static let translationTargetKey = "translationTargetIdentifier"
+    private static let subtitleOverlayKey = "subtitleOverlayEnabled"
 
     private let defaults: UserDefaults
 }

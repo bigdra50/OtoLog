@@ -7,10 +7,11 @@
 [![Homebrew tap](https://img.shields.io/badge/brew-bigdra50%2Ftap%2Fotolog-informational?logo=homebrew&logoColor=white)](https://github.com/bigdra50/homebrew-tap)
 
 Mac から出る任意の音声をリアルタイム文字起こしして記録セッション（講演・会議など開始〜停止の単位）ごとに保存する、メニューバー常駐アプリ。
-録音・認識・保存はすべてオンデバイス（Apple SpeechAnalyzer）で完結し、クラウド送信はない。
+録音・認識・翻訳・保存はすべてオンデバイス（Apple SpeechAnalyzer / Translation）で完結し、本文がクラウドへ出ることはない。
 
 - キャプチャ: CoreAudio Process Tap のシステム音声（BlackHole 等の仮想ドライバ不要、音声ルーティング無変更、画面収録権限も不要）
 - 認識: macOS 26 SpeechAnalyzer（日本語対応、volatile 結果によるライブ字幕付き）
+- 翻訳: Apple Translation で確定セグメントを訳し、記録に併記して画面に字幕も出せる（任意）
 - 保存: セッションごとのディレクトリに transcript.md（人が読む用）+ transcript.jsonl（後処理用の生セグメント）+ meta.json
 
 ## 必要環境
@@ -44,6 +45,7 @@ mise run install   # ビルド → ~/Applications/OtoLog.app へ配置 → 起�
 | 記録の閲覧（ライブラリ） | ポップオーバーの「ライブラリ」→ 専用ウィンドウ |
 | 最新の記録を開く | ポップオーバー（セッションが無ければ保存先フォルダを開く） |
 | 生成 / タイトル生成 | ポップオーバー内の「生成」 |
+| 翻訳 / 翻訳先 / 画面字幕 | ポップオーバー内の「設定」 |
 | 言語 / 保存先 / claude パス / 停止時の自動処理 / ログイン時起動 | ポップオーバー内の「設定」 |
 
 ### ライブラリ（ビューワー）
@@ -72,6 +74,32 @@ mise run install   # ビルド → ~/Applications/OtoLog.app へ配置 → 起�
 - セッションは開始〜停止の1単位。日を跨いでも同一ディレクトリに記録され続ける
 - タイトルは停止後に claude で自動生成できる（設定「停止時の自動処理」）。手動は「生成」内の「タイトル生成」から。**ディレクトリ名がタイトルにリネーム**され、meta.json・md 見出しもまとめて更新される
 - 移行: 旧日次形式は `swift run otolog-devtool migrate-daily <保存先>`、旧フラット構造（yyyy-MM-dd_HHmm_タイトル/）は `swift run otolog-devtool migrate-structure <保存先>`。旧フラット構造は移行しなくても読み取り互換で表示される
+
+翻訳が有効なときは、jsonl に `translation` / `translationLocale` が加わり、md では原文の子行に訳が付く。
+
+```markdown
+- **13:04:31** で、まあランダム性の高い挙動が多い。
+  - There are many behaviors with high randomness.
+```
+
+原文は常に正本として残る。後処理（議事録などの生成）の入力も原文のままで、訳は使わない。
+
+## 翻訳
+
+設定の「翻訳する」を有効にすると、確定したセグメントを訳して記録と字幕に流す。
+認識と同じくオンデバイス処理で、本文がネットワークへ出ることはない。
+
+- 翻訳先の既定はシステムの言語設定。設定のピッカーで変更できる
+- 「画面に字幕を表示」で、記録中の訳を画面下部へ重ねられる。原文（小）+ 訳（大）の2段で、クリックは透過する。表示先はメニューバーのある画面
+- 訳せなかったセグメントは原文だけで保存され、記録は止まらない
+
+制約:
+
+- 翻訳先の候補は言語モデルがダウンロード済みのものだけ。他の言語はシステム設定 > 一般 > 言語と地域 > 翻訳言語 で追加する
+- 翻訳先が認識言語と同じときは翻訳されない（同一言語ペアは翻訳できない）
+- 訳すのは確定セグメントだけで、ライブ字幕の途中経過は訳さない。発話から字幕までは確定待ち（実測で中央値 11.5 秒）＋翻訳（同 1.1 秒）ぶん遅れる
+- 既定の翻訳モデルは Apple Intelligence を使う。無効な環境では従来モデルへ切り替わり、言語のダウンロードが別途必要になる
+- Apple は翻訳内容そのものを収集しないが、bundle ID と言語ペアの利用メトリクスを収集することがある
 
 ## 生成（後処理）
 
@@ -151,7 +179,7 @@ swift run otolog-devtool ctl <status|start|stop>      # 起動中アプリの制
 - `OTOLOG_CLAUDE_DEBUG=1` で claude 呼び出しごとの診断ログを `$XDG_STATE_HOME/otolog/claude-logs/`（既定 `~/.local/state/...`）へ保存する。呼び出しタイムライン（`.log`: 引数・プロンプトサイズ・チャンク受信・終了/エラー）と claude CLI 内部ログ（`-cli.log`: API リクエスト・リトライ）の2ファイル1組。生成が進んでいるか・リトライで詰まっているかの切り分けに使う
   - GUI アプリで有効化する場合は `launchctl setenv OTOLOG_CLAUDE_DEBUG 1` してからアプリを再起動（戻すときは `unsetenv`）
 - 構成: `OtoLogCore`（コントラクト + 実装、全ロジックのテストはここ）/ `OtoLogApp`（薄い UI 層、テストなし）
-- コントラクト（`Contracts/`）を境界に、キャプチャ源・エンジン・ストアは差し替え可能
+- コントラクト（`Contracts/`）を境界に、キャプチャ源・エンジン・ストア・翻訳器は差し替え可能
 
 ### 設計上の要点（SpeechAnalyzer の落とし穴）
 

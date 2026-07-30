@@ -21,6 +21,8 @@ public enum SessionEvent: Sendable, Equatable {
     case segmentRecorded(TranscriptSegment)
     /// 保存失敗。セッション自体は継続する
     case storeError(String)
+    /// 翻訳失敗。原文だけが保存され、セッション自体は継続する
+    case translationError(String)
     /// 停止完了（全セグメント保存済み）。タイトル生成やパイプラインの起点
     case sessionFinished(SessionRef)
 }

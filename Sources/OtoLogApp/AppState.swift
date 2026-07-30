@@ -30,8 +30,11 @@ struct PipelineTaskDisplay: Equatable, Identifiable {
     var sessionState: SessionState = .idle
     var liveText = ""
     var lastSegmentText = ""
+    /// 直近セグメントの訳。翻訳オフ・訳せなかったときは空
+    var lastSegmentTranslation = ""
     var preparationProgress: Double = 0
     var storeErrorMessage: String?
+    var translationErrorMessage: String?
 
     var generationState: GenerationState = .idle
     var generationSessions: [SessionRef] = []

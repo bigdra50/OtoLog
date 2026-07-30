@@ -30,7 +30,9 @@ public struct TranscriptSegment: Sendable, Equatable, Codable {
         locale: String,
         source: AudioSourceKind,
         sessionID: UUID,
-        sessionStartedAt: Date
+        sessionStartedAt: Date,
+        translation: String? = nil,
+        translationLocale: String? = nil
     ) {
         self.text = text
         self.audioStart = audioStart
@@ -40,6 +42,8 @@ public struct TranscriptSegment: Sendable, Equatable, Codable {
         self.source = source
         self.sessionID = sessionID
         self.sessionStartedAt = sessionStartedAt
+        self.translation = translation
+        self.translationLocale = translationLocale
     }
 
     // MARK: Public
@@ -55,4 +59,9 @@ public struct TranscriptSegment: Sendable, Equatable, Codable {
     /// 後処理で絶対時刻を復元できるようセッション情報を持たせる
     public var sessionID: UUID
     public var sessionStartedAt: Date
+    /// 翻訳が有効なセッションでのみ入る。訳に失敗したセグメントは nil のまま保存される
+    public var translation: String?
+    /// translation の言語（BCP-47）。設定した翻訳先ではなく実際に訳された言語を持つ
+    /// （システム既定の en-Latn-JP を要求すると en-Latn-US で返るため）
+    public var translationLocale: String?
 }

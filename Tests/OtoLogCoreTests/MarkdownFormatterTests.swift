@@ -39,4 +39,33 @@ struct MarkdownFormatterTests {
         let line = formatter.line(for: makeSegment(text: " \n\t "))
         #expect(line == nil)
     }
+
+    /// 訳は原文の子行として併記する。原文を正本として残したまま訳を読めるようにするため
+    @Test func rendersTranslationAsChildLine() {
+        var segment = makeSegment(text: "こんにちは")
+        segment.translation = "Hello"
+
+        let line = formatter.line(for: segment)
+
+        #expect(line == "- **13:00:00** こんにちは\n  - Hello\n")
+    }
+
+    @Test func squashesNewlinesInTranslation() {
+        var segment = makeSegment(text: "こんにちは")
+        segment.translation = "  Hello\nworld  "
+
+        let line = formatter.line(for: segment)
+
+        #expect(line == "- **13:00:00** こんにちは\n  - Hello world\n")
+    }
+
+    /// 訳が空白だけなら子行を足さない（原文だけの行に落とす）
+    @Test func skipsChildLineForWhitespaceOnlyTranslation() {
+        var segment = makeSegment(text: "こんにちは")
+        segment.translation = "   "
+
+        let line = formatter.line(for: segment)
+
+        #expect(line == "- **13:00:00** こんにちは\n")
+    }
 }
