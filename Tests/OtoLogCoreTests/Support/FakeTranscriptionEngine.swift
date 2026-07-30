@@ -29,8 +29,16 @@ final class FakeTranscriptionEngine: TranscriptionEngine, @unchecked Sendable {
         lock.withLock { _receivedContexts }
     }
 
-    func prepare(locale _: Locale, onProgress: @escaping @Sendable (Double) -> Void) async throws -> AVAudioFormat {
-        lock.withLock { _prepareCallCount += 1 }
+    /// prepare へ渡された候補ロケール。自動検出の候補が届いているかの検証用
+    var receivedLocales: [[Locale]] {
+        lock.withLock { _receivedLocales }
+    }
+
+    func prepare(locales: [Locale], onProgress: @escaping @Sendable (Double) -> Void) async throws -> AVAudioFormat {
+        lock.withLock {
+            _prepareCallCount += 1
+            _receivedLocales.append(locales)
+        }
         if let prepareError { throw prepareError }
         for progress in progressScript {
             onProgress(progress)
@@ -84,6 +92,7 @@ final class FakeTranscriptionEngine: TranscriptionEngine, @unchecked Sendable {
     private var _finishCallCount = 0
     private var _consumedChunkCount = 0
     private var _receivedContexts: [TranscriptionContext] = []
+    private var _receivedLocales: [[Locale]] = []
 
     private var currentEventContinuation: AsyncThrowingStream<TranscriptEvent, any Error>.Continuation? {
         lock.withLock { eventContinuation }

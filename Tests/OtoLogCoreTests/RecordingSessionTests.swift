@@ -11,7 +11,7 @@ struct RecordingSessionTests {
         let sut = makeSUT()
         sut.engine.progressScript = [0.5]
 
-        await sut.session.start(locale: ja)
+        await sut.session.start(locales: [ja])
 
         #expect(await eventually { sut.collector.events.contains(.stateChanged(.recording)) })
         #expect(Array(sut.collector.events.prefix(3)) == [
@@ -29,7 +29,7 @@ struct RecordingSessionTests {
         let startedAt = Date(timeIntervalSince1970: 1_785_297_600)
         let sut = makeSUT(now: { startedAt }, makeSessionID: { id })
 
-        await sut.session.start(locale: ja)
+        await sut.session.start(locales: [ja])
 
         _ = await eventually { await sut.session.state == .recording }
         let context = sut.engine.receivedContexts.first
@@ -102,7 +102,7 @@ struct RecordingSessionTests {
     @Test func secondStartWhileRecordingIsNoOp() async {
         let sut = await makeStartedSUT()
 
-        await sut.session.start(locale: ja)
+        await sut.session.start(locales: [ja])
 
         #expect(sut.engine.prepareCallCount == 1)
     }
@@ -120,7 +120,7 @@ struct RecordingSessionTests {
         let sut = makeSUT()
         sut.engine.prepareError = Boom()
 
-        await sut.session.start(locale: ja)
+        await sut.session.start(locales: [ja])
 
         let state = await sut.session.state
         guard case .failed = state else {
@@ -270,7 +270,12 @@ struct RecordingSessionTests {
         translationTimeout: Duration = .seconds(10)
     ) async -> SUT {
         let sut = makeSUT(now: now, translationTimeout: translationTimeout)
-        await sut.session.start(locale: ja, translator: translator)
+        // 翻訳器はロケールごとに引かれる。テストではどのロケールでも同じものを返す
+        var factory: (@Sendable (String) -> (any Translator)?)?
+        if let translator {
+            factory = { _ in translator }
+        }
+        await sut.session.start(locales: [ja], makeTranslator: factory)
         _ = await eventually { await sut.session.state == .recording }
         return sut
     }

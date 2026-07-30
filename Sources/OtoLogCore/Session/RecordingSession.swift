@@ -39,18 +39,25 @@ public actor RecordingSession {
 
     public private(set) var state: SessionState = .idle
 
-    /// translator は記録セッション単位の設定。nil なら訳さない
-    /// （翻訳先が認識言語と同じときも生成側が nil を返す）
-    public func start(locale: Locale, translator: (any Translator)? = nil) async {
-        guard canStart else { return }
+    /// locales を複数渡すと、話されている言語をエンジンが選ぶ。先頭は判定できなかったときの既定。
+    ///
+    /// makeTranslator はセグメントのロケールを受けて翻訳器を作る。自動検出では開始時点で
+    /// 翻訳元が決まらないため、生成を確定セグメントまで遅らせる。
+    /// nil を返したロケールは訳さない（翻訳先が認識言語と同じ場合など）
+    public func start(
+        locales: [Locale],
+        makeTranslator: (@Sendable (String) -> (any Translator)?)? = nil
+    ) async {
+        guard canStart, let primary = locales.first else { return }
         cleanUpPreviousRun()
-        self.translator = translator
+        self.makeTranslator = makeTranslator
+        translatorCache.removeAll()
         setState(.preparing)
 
         let continuation = eventContinuation
         let format: AVAudioFormat
         do {
-            format = try await engine.prepare(locale: locale, onProgress: { progress in
+            format = try await engine.prepare(locales: locales, onProgress: { progress in
                 continuation.yield(.preparationProgress(progress))
             })
         } catch {
@@ -62,9 +69,10 @@ public actor RecordingSession {
         let (chunkStream, chunkContinuation) = AsyncThrowingStream<AudioChunk, any Error>.makeStream()
         self.chunkContinuation = chunkContinuation
 
-        // セッション識別子はここで発行し、engine（セグメント転写）と store（保存先）へ配る
+        // セッション識別子はここで発行し、engine（セグメント転写）と store（保存先）へ配る。
+        // locale は候補の先頭。実際に話されていた言語はエンジンが判定してセグメントへ入れる
         let context = TranscriptionContext(
-            locale: locale.identifier(.bcp47),
+            locale: primary.identifier(.bcp47),
             source: source,
             sessionID: makeSessionID(),
             sessionStartedAt: now()
@@ -123,8 +131,10 @@ public actor RecordingSession {
     private let makeSessionID: @Sendable () -> UUID
     private nonisolated let eventContinuation: AsyncStream<SessionEvent>.Continuation
 
-    /// start で受け取った翻訳器。記録中は差し替わらない
-    private var translator: (any Translator)?
+    /// start で受け取った翻訳器の生成手段。記録中は差し替わらない
+    private var makeTranslator: (@Sendable (String) -> (any Translator)?)?
+    /// ロケールごとの翻訳器。作れなかった場合も nil を覚えて作り直さない
+    private var translatorCache: [String: (any Translator)?] = [:]
     private var currentContext: TranscriptionContext?
     private var analyzerFormat: AVAudioFormat?
     private var chunkContinuation: AsyncThrowingStream<AudioChunk, any Error>.Continuation?
@@ -224,7 +234,7 @@ public actor RecordingSession {
 
     /// 訳を載せて返す。翻訳器が無い・失敗・時間切れのときは原文のまま返し、記録は止めない
     private func translated(_ segment: TranscriptSegment) async -> TranscriptSegment {
-        guard let translator else { return segment }
+        guard let translator = translator(for: segment.locale) else { return segment }
         do {
             let text = segment.text
             let result = try await withTimeout(translationTimeout) {
@@ -238,6 +248,14 @@ public actor RecordingSession {
             eventContinuation.yield(.translationError(error.localizedDescription))
             return segment
         }
+    }
+
+    /// セグメントのロケールに対応する翻訳器。自動検出では話者の言語が確定してから作られる
+    private func translator(for locale: String) -> (any Translator)? {
+        if let cached = translatorCache[locale] { return cached }
+        let created = makeTranslator?(locale)
+        translatorCache[locale] = created
+        return created
     }
 
     private func engineFailed(_ error: any Error) {

@@ -75,7 +75,7 @@ struct TestDoubleTests {
         let source = FakeCaptureSource()
         source.initialChunks = [AudioChunk(buffer: TestSignal.sine(format: format, seconds: 0.1))]
 
-        _ = try await engine.prepare(locale: Locale(identifier: "ja-JP"), onProgress: { _ in })
+        _ = try await engine.prepare(locales: [Locale(identifier: "ja-JP")], onProgress: { _ in })
         let chunks = try await source.start(targetFormat: format)
         let context = TranscriptionContext(
             locale: "ja-JP", source: .system,

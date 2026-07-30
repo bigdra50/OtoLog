@@ -11,7 +11,7 @@ public enum TranslationTargets {
     public static func installed(
         for sourceLocale: String,
         displayLocale: Locale = .current
-    ) async -> [TranslationTarget] {
+    ) async -> [LanguageChoice] {
         let availability = LanguageAvailability()
         let source = Locale.Language(identifier: sourceLocale)
         var identifiers: [String] = []
@@ -19,6 +19,6 @@ public enum TranslationTargets {
             where await availability.status(from: source, to: candidate) == .installed {
             identifiers.append(candidate.maximalIdentifier)
         }
-        return TranslationTargetList.make(identifiers: identifiers, displayLocale: displayLocale)
+        return LanguageChoiceList.make(identifiers: identifiers, displayLocale: displayLocale)
     }
 }

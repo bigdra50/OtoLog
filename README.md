@@ -10,7 +10,7 @@ Mac から出る任意の音声をリアルタイム文字起こしして記録�
 録音・認識・翻訳・保存はすべてオンデバイス（Apple SpeechAnalyzer / Translation）で完結し、本文がクラウドへ出ることはない。
 
 - キャプチャ: CoreAudio Process Tap のシステム音声（BlackHole 等の仮想ドライバ不要、音声ルーティング無変更、画面収録権限も不要）
-- 認識: macOS 26 SpeechAnalyzer（日本語対応、volatile 結果によるライブ字幕付き）
+- 認識: macOS 26 SpeechAnalyzer（30 ロケール対応、話者の言語の自動検出つき、volatile 結果によるライブ字幕付き）
 - 翻訳: Apple Translation で確定セグメントを訳し、記録に併記して画面に字幕も出せる（任意）
 - 保存: セッションごとのディレクトリに transcript.md（人が読む用）+ transcript.jsonl（後処理用の生セグメント）+ meta.json
 
@@ -45,8 +45,8 @@ mise run install   # ビルド → ~/Applications/OtoLog.app へ配置 → 起�
 | 記録の閲覧（ライブラリ） | ポップオーバーの「ライブラリ」→ 専用ウィンドウ |
 | 最新の記録を開く | ポップオーバー（セッションが無ければ保存先フォルダを開く） |
 | 生成 / タイトル生成 | ポップオーバー内の「生成」 |
-| 翻訳 / 翻訳先 / 画面字幕 | ポップオーバー内の「設定」 |
-| 言語 / 保存先 / claude パス / 停止時の自動処理 / ログイン時起動 | ポップオーバー内の「設定」 |
+| 聞き取る言語（自動検出も可） / 翻訳 / 翻訳先 / 画面字幕 | ポップオーバー内の「設定」 |
+| 保存先 / claude パス / 停止時の自動処理 / ログイン時起動 | ポップオーバー内の「設定」 |
 
 ### ライブラリ（ビューワー）
 
@@ -96,10 +96,23 @@ mise run install   # ビルド → ~/Applications/OtoLog.app へ配置 → 起�
 制約:
 
 - 翻訳先の候補は言語モデルがダウンロード済みのものだけ。他の言語はシステム設定 > 一般 > 言語と地域 > 翻訳言語 で追加する
-- 翻訳先が認識言語と同じときは翻訳されない（同一言語ペアは翻訳できない）
+- 翻訳先が聞き取る言語と同じときは翻訳されない（同一言語ペアは翻訳できない）
 - 訳すのは確定セグメントだけで、ライブ字幕の途中経過は訳さない。発話から字幕までは確定待ち（実測で中央値 11.5 秒）＋翻訳（同 1.1 秒）ぶん遅れる
 - 既定の翻訳モデルは Apple Intelligence を使う。無効な環境では従来モデルへ切り替わり、言語のダウンロードが別途必要になる
 - Apple は翻訳内容そのものを収集しないが、bundle ID と言語ペアの利用メトリクスを収集することがある
+
+### 聞き取る言語の自動検出
+
+「聞き取る言語」を「自動検出」にすると、候補の言語で同時に認識し、話されている言語を選んで1つに絞る。
+翻訳先だけ決めておけば、何語か分からない音源でもそのまま記録できる。
+
+仕組みは、誤ったロケールの認識器が音を無理に写すこと（日本語を英語で聞けば "Hong jitsuba"、英語を日本語で聞けば "Today Iant toトーク"）を利用している。
+各認識器の出力を言語判定にかけ、自分のロケールと一致したものを採用する。
+
+- 候補は同時に5つまで。予約枠がシステム全体で共有されるため（`AssetInventory.maximumReservedLocales`）
+- 候補に出るのは認識モデルがダウンロード済みの言語だけ。未ダウンロードの言語は「聞き取る言語」で一度固定して記録すると落ちてくる
+- 判定がつくまで数秒〜十数秒かかる（実測で英語 4.2 秒・日本語 12.3 秒）。その間の発話は保留され、決まった時点でまとめて記録される
+- 候補に無い言語は検出できない。判定がつかないまま終わった場合は候補の先頭で記録される
 
 ## 生成（後処理）
 
@@ -164,7 +177,7 @@ mise run test:claude        # 実 claude -p の統合テスト（課金あり・
 mise run bundle             # dist/OtoLog.app を組み立て
 mise run install            # ~/Applications へ配置して起動
 mise run skill:install      # otolog-generate スキルを ~/.claude/skills へ symlink
-swift run otolog-devtool <audio-file> [locale]        # エンジン単体の検証CLI
+swift run otolog-devtool <audio-file> [locale...]     # エンジン単体の検証CLI（カンマ区切りで自動検出）
 swift run otolog-devtool export-templates <dir>       # 組み込みテンプレートの書き出し
 swift run otolog-devtool migrate-daily <dir>          # 旧日次形式をセッション構造へ移行
 swift run otolog-devtool ctl <status|start|stop>      # 起動中アプリの制御（エージェント連携用）

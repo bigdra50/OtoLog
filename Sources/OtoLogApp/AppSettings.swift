@@ -40,6 +40,8 @@ enum PostStopAction: String, CaseIterable {
             ?? Self.systemTranslationTarget
         // bool(forKey:) は未設定でも false になるため、既定 true は object の有無で判定する
         subtitleOverlayEnabled = defaults.object(forKey: Self.subtitleOverlayKey) as? Bool ?? true
+        recognitionCandidates = defaults.stringArray(forKey: Self.recognitionCandidatesKey)
+            ?? Self.defaultRecognitionCandidates
     }
 
     // MARK: Internal
@@ -49,6 +51,12 @@ enum PostStopAction: String, CaseIterable {
 
     /// 「システム設定に従う」を表す予約値（BCP-47 と衝突しない）
     static let systemTranslationTarget = "system"
+
+    /// 聞き取る言語を話者から判定させる予約値
+    static let autoRecognitionLocale = "auto"
+
+    /// 自動検出の既定候補。何語か分からない音源で当たりやすい順に並べる
+    static let defaultRecognitionCandidates = ["en-US", "ja-JP"]
 
     var localeIdentifier: String {
         didSet { defaults.set(localeIdentifier, forKey: Self.localeKey) }
@@ -88,6 +96,18 @@ enum PostStopAction: String, CaseIterable {
         didSet { defaults.set(subtitleOverlayEnabled, forKey: Self.subtitleOverlayKey) }
     }
 
+    /// localeIdentifier が autoRecognitionLocale のときに並行認識する候補。
+    /// 予約枠の都合で 5 個までしか渡せない（AssetInventory.maximumReservedLocales）
+    var recognitionCandidates: [String] {
+        didSet { defaults.set(recognitionCandidates, forKey: Self.recognitionCandidatesKey) }
+    }
+
+    /// 実際に認識へ渡す候補。先頭は判定できなかったときの落としどころになる
+    var resolvedRecognitionLocales: [String] {
+        guard localeIdentifier == Self.autoRecognitionLocale else { return [localeIdentifier] }
+        return recognitionCandidates.isEmpty ? Self.defaultRecognitionCandidates : recognitionCandidates
+    }
+
     /// 実際に翻訳先として渡す BCP-47。
     /// システム既定は supportedLanguages に無い組み合わせ（en-Latn-JP 等）になり得るが、
     /// 正規化せず framework の解決に委ねる。言語コードで候補へ寄せ直すと
@@ -116,6 +136,7 @@ enum PostStopAction: String, CaseIterable {
     private static let translationEnabledKey = "translationEnabled"
     private static let translationTargetKey = "translationTargetIdentifier"
     private static let subtitleOverlayKey = "subtitleOverlayEnabled"
+    private static let recognitionCandidatesKey = "recognitionCandidates"
 
     private let defaults: UserDefaults
 }

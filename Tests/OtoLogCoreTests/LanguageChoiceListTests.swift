@@ -2,13 +2,13 @@ import Foundation
 @testable import OtoLogCore
 import Testing
 
-struct TranslationTargetListTests {
+struct LanguageChoiceListTests {
     let ja = Locale(identifier: "ja-JP")
 
     /// 表記体系が1つしかない言語では script を表示から落とす。
     /// maximalIdentifier をそのまま訳すと「英語（ラテン文字、アメリカ合衆国）」になり冗長
     @Test func omitsScriptWhenLanguageHasSingleScript() {
-        let targets = TranslationTargetList.make(
+        let targets = LanguageChoiceList.make(
             identifiers: ["en-Latn-US", "en-Latn-GB"], displayLocale: ja
         )
 
@@ -17,7 +17,7 @@ struct TranslationTargetListTests {
 
     /// 簡体・繁体のように表記体系が割れる言語では script を残す
     @Test func keepsScriptWhenLanguageHasMultipleScripts() {
-        let targets = TranslationTargetList.make(
+        let targets = LanguageChoiceList.make(
             identifiers: ["zh-Hans-CN", "zh-Hant-TW", "zh-Hant-HK"], displayLocale: ja
         )
 
@@ -28,7 +28,7 @@ struct TranslationTargetListTests {
 
     /// 地域が1つしかない言語では地域も落とす
     @Test func omitsRegionWhenLanguageHasSingleRegion() {
-        let targets = TranslationTargetList.make(
+        let targets = LanguageChoiceList.make(
             identifiers: ["ko-Kore-KR", "da-Latn-DK"], displayLocale: ja
         )
 
@@ -37,7 +37,7 @@ struct TranslationTargetListTests {
 
     /// 表示をどう畳んでも、翻訳先として渡す識別子は元のまま
     @Test func keepsOriginalIdentifier() {
-        let targets = TranslationTargetList.make(
+        let targets = LanguageChoiceList.make(
             identifiers: ["en-Latn-US", "zh-Hans-CN"], displayLocale: ja
         )
 
@@ -46,7 +46,7 @@ struct TranslationTargetListTests {
 
     /// 実際の候補群に近い混在リストでも、言語ごとに畳み方が切り替わる
     @Test func foldsPerLanguageInMixedList() {
-        let targets = TranslationTargetList.make(
+        let targets = LanguageChoiceList.make(
             identifiers: ["en-Latn-US", "en-Latn-GB", "ko-Kore-KR", "zh-Hans-CN", "zh-Hant-TW", "pt-Latn-BR", "pt-Latn-PT"],
             displayLocale: ja
         )
@@ -59,6 +59,6 @@ struct TranslationTargetListTests {
     }
 
     @Test func returnsEmptyForEmptyInput() {
-        #expect(TranslationTargetList.make(identifiers: [], displayLocale: ja).isEmpty)
+        #expect(LanguageChoiceList.make(identifiers: [], displayLocale: ja).isEmpty)
     }
 }

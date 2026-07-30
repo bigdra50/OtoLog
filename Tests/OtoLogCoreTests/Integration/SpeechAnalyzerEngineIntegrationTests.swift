@@ -44,11 +44,62 @@ import Testing
         #expect(combined.contains("integrationtest"))
     }
 
+    /// 候補を複数渡すと話者の言語が選ばれ、その言語の結果だけが残る。
+    /// 判定がつくまでの発話も落とさずに出てくることまで見る
+    @Test func detectsJapaneseAmongCandidates() async throws {
+        let fixture = try makeSayFixture(
+            voice: "Kyoko",
+            text: "本日はボクセルレンダリングの大規模化についてお話しします。オクツリーは破綻します。"
+        )
+        defer { try? FileManager.default.removeItem(at: fixture) }
+
+        let finals = try await transcribe(fixture, localeIdentifiers: ["en-US", "ja-JP"])
+
+        #expect(!finals.isEmpty)
+        #expect(finals.allSatisfy { $0.locale == "ja-JP" })
+        // 冒頭（判定前に確定した分）が欠けていないこと
+        #expect(normalize(finals.map(\.text).joined()).contains("本日"))
+    }
+
+    @Test func detectsEnglishAmongCandidates() async throws {
+        guard try voiceAvailable("Samantha") else { return }
+        let fixture = try makeSayFixture(
+            voice: "Samantha",
+            text: "Today I want to talk about how we approach voxel rendering at scale, and why the naive octree approach breaks down."
+        )
+        defer { try? FileManager.default.removeItem(at: fixture) }
+
+        let finals = try await transcribe(fixture, localeIdentifiers: ["ja-JP", "en-US"])
+
+        #expect(!finals.isEmpty)
+        // 候補の先頭が ja-JP でも、話者が英語なら英語が選ばれる
+        #expect(finals.allSatisfy { $0.locale == "en-US" })
+        #expect(normalize(finals.map(\.text).joined()).lowercased().contains("today"))
+    }
+
+    /// 予約枠を超える指定は始める前に弾く。黙って認識が始まらないより明示エラーがよい
+    @Test func rejectsMoreLocalesThanReservationLimit() async throws {
+        let engine = SpeechAnalyzerEngine()
+        let tooMany = (0...AssetInventory.maximumReservedLocales)
+            .map { _ in Locale(identifier: "en-US") }
+
+        await #expect(throws: EngineError.self) {
+            _ = try await engine.prepare(locales: tooMany, onProgress: { _ in })
+        }
+    }
+
     // MARK: Private
 
     private func transcribe(_ url: URL, localeIdentifier: String) async throws -> [TranscriptSegment] {
+        try await transcribe(url, localeIdentifiers: [localeIdentifier])
+    }
+
+    private func transcribe(_ url: URL, localeIdentifiers: [String]) async throws -> [TranscriptSegment] {
+        let localeIdentifier = localeIdentifiers[0]
         let engine = SpeechAnalyzerEngine()
-        let format = try await engine.prepare(locale: Locale(identifier: localeIdentifier), onProgress: { _ in })
+        let format = try await engine.prepare(
+            locales: localeIdentifiers.map { Locale(identifier: $0) }, onProgress: { _ in }
+        )
         let capture = FileCaptureSource(url: url)
         let chunks = try await capture.start(targetFormat: format)
         let context = TranscriptionContext(

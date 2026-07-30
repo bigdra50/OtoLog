@@ -11,27 +11,16 @@ struct SettingsView: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
-            Picker("言語", selection: $settings.localeIdentifier) {
-                ForEach(localeChoices, id: \.self) { identifier in
-                    Text(displayName(for: identifier)).tag(identifier)
+            Picker("聞き取る言語", selection: $settings.localeIdentifier) {
+                Text("自動検出").tag(AppSettings.autoRecognitionLocale)
+                ForEach(recognitionChoices) { choice in
+                    Text(choice.displayName).tag(choice.identifier)
                 }
             }
             .pickerStyle(.menu)
 
-            HStack(spacing: 4) {
-                Text("保存先")
-                Text(settings.saveDirectoryPath)
-                    .foregroundStyle(.secondary)
-                    .lineLimit(1)
-                    .truncationMode(.middle)
-                Spacer()
-                IconButton(systemImage: "folder", label: "保存先を変更…") { chooseDirectory() }
-            }
-
-            HStack {
-                Text("claude パス")
-                TextField("~/.local/bin/claude", text: $settings.claudeExecutablePath)
-                    .textFieldStyle(.roundedBorder)
+            if settings.localeIdentifier == AppSettings.autoRecognitionLocale {
+                detectionCandidates
             }
 
             Toggle("翻訳する", isOn: $settings.translationEnabled)
@@ -59,6 +48,22 @@ struct SettingsView: View {
                 Text("他の言語はシステム設定 > 一般 > 言語と地域 > 翻訳言語 で追加できます。")
                     .font(.caption2)
                     .foregroundStyle(.secondary)
+            }
+
+            HStack(spacing: 4) {
+                Text("保存先")
+                Text(settings.saveDirectoryPath)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+                Spacer()
+                IconButton(systemImage: "folder", label: "保存先を変更…") { chooseDirectory() }
+            }
+
+            HStack {
+                Text("claude パス")
+                TextField("~/.local/bin/claude", text: $settings.claudeExecutablePath)
+                    .textFieldStyle(.roundedBorder)
             }
 
             Picker("停止時の自動処理", selection: $settings.postStopAction) {
@@ -89,9 +94,15 @@ struct SettingsView: View {
         }
         .font(.caption)
         .panelBackground()
-        // 認識言語が変わると訳せる相手も変わる（同じ言語は候補から消える）
+        // 聞き取る言語が変わると訳せる相手も変わる（同じ言語は候補から消える）
         .task(id: settings.localeIdentifier) {
-            translationTargets = await TranslationTargets.installed(for: settings.localeIdentifier)
+            // 自動検出では聞き取る言語が事前に決まらないので、候補の先頭を基準にする
+            let source = settings.resolvedRecognitionLocales.first ?? settings.localeIdentifier
+            translationTargets = await TranslationTargets.installed(for: source)
+        }
+        .task {
+            recognitionChoices = await RecognitionLocales.supported()
+            installedRecognitionChoices = await RecognitionLocales.installed()
         }
     }
 
@@ -99,7 +110,9 @@ struct SettingsView: View {
 
     @State private var loginItemEnabled = LoginItemManager.isEnabled
     @State private var loginItemError: String?
-    @State private var translationTargets: [TranslationTarget] = []
+    @State private var translationTargets: [LanguageChoice] = []
+    @State private var recognitionChoices: [LanguageChoice] = []
+    @State private var installedRecognitionChoices: [LanguageChoice] = []
 
     private var systemTargetLabel: String {
         let code = Locale.current.language.languageCode?.identifier ?? ""
@@ -109,21 +122,14 @@ struct SettingsView: View {
         return "システム設定に従う（\(name)）"
     }
 
-    /// 認識言語と同じ言語は翻訳できない。設定できてしまうので気づけるようにする
+    /// 同じ言語どうしは翻訳できない。設定はできてしまうので気づけるようにする。
+    /// 自動検出では聞き取る言語が事前に決まらないため出さない
     private var sameLanguageWarning: String? {
+        guard settings.localeIdentifier != AppSettings.autoRecognitionLocale else { return nil }
         let source = Locale.Language(identifier: settings.localeIdentifier).languageCode?.identifier
         let target = Locale.Language(identifier: settings.resolvedTranslationTarget).languageCode?.identifier
         guard let source, let target, source == target else { return nil }
-        return "翻訳先が認識言語と同じため翻訳されません。"
-    }
-
-    /// MVP は主要ロケールのみ。全対応ロケールの列挙は将来 SpeechTranscriber.supportedLocales から
-    private var localeChoices: [String] {
-        var choices = ["ja-JP", "en-US"]
-        if !choices.contains(settings.localeIdentifier) {
-            choices.append(settings.localeIdentifier)
-        }
-        return choices
+        return "翻訳先が聞き取る言語と同じため翻訳されません。"
     }
 
     private var loginItemBinding: Binding<Bool> {
@@ -141,8 +147,47 @@ struct SettingsView: View {
         }
     }
 
-    private func displayName(for identifier: String) -> String {
-        Locale.current.localizedString(forIdentifier: identifier) ?? identifier
+    /// 自動検出で同時に走らせる言語を選ぶ。モデル DL 済みのものだけを出す
+    private var detectionCandidates: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Text("検出候補（\(settings.recognitionCandidates.count) / \(RecognitionLocales.maximumCandidates)）")
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+            ScrollView {
+                VStack(alignment: .leading, spacing: 2) {
+                    ForEach(installedRecognitionChoices) { choice in
+                        Toggle(choice.displayName, isOn: candidateBinding(choice.identifier))
+                            .toggleStyle(.checkbox)
+                            .disabled(isCandidateDisabled(choice.identifier))
+                    }
+                }
+            }
+            .frame(maxHeight: 96)
+            Text("話されている言語をここから選びます。判定がつくまで数秒〜十数秒かかります。")
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+        }
+    }
+
+    private func candidateBinding(_ identifier: String) -> Binding<Bool> {
+        Binding {
+            settings.recognitionCandidates.contains(identifier)
+        } set: { isOn in
+            var candidates = settings.recognitionCandidates
+            if isOn {
+                guard candidates.count < RecognitionLocales.maximumCandidates else { return }
+                candidates.append(identifier)
+            } else {
+                candidates.removeAll { $0 == identifier }
+            }
+            settings.recognitionCandidates = candidates
+        }
+    }
+
+    /// 上限まで選ばれていたら、未選択のものは触れないようにする
+    private func isCandidateDisabled(_ identifier: String) -> Bool {
+        !settings.recognitionCandidates.contains(identifier)
+            && settings.recognitionCandidates.count >= RecognitionLocales.maximumCandidates
     }
 
     private func chooseDirectory() {

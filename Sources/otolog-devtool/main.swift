@@ -209,10 +209,13 @@ if args[1] == "migrate-daily" {
 }
 
 let url = URL(fileURLWithPath: args[1])
-let localeIdentifier = args.count >= 3 ? args[2] : "ja-JP"
+// カンマ区切りで複数指定すると並行認識して話されている言語を選ぶ（例: en-US,ja-JP）
+let localeIdentifiers = (args.count >= 3 ? args[2] : "ja-JP")
+    .split(separator: ",")
+    .map { $0.trimmingCharacters(in: .whitespaces) }
 
 let engine = SpeechAnalyzerEngine()
-let format = try await engine.prepare(locale: Locale(identifier: localeIdentifier)) { progress in
+let format = try await engine.prepare(locales: localeIdentifiers.map { Locale(identifier: $0) }) { progress in
     FileHandle.standardError.write(Data(String(format: "downloading model: %.0f%%\n", progress * 100).utf8))
 }
 
@@ -226,7 +229,8 @@ let capture = FileCaptureSource(url: url)
 let chunks = try await capture.start(targetFormat: format)
 trace("capture started")
 let context = TranscriptionContext(
-    locale: localeIdentifier,
+    // 候補の先頭。複数指定した場合、実際のロケールはエンジンが判定してセグメントへ入れる
+    locale: localeIdentifiers[0],
     source: .system,
     sessionID: UUID(),
     sessionStartedAt: Date()

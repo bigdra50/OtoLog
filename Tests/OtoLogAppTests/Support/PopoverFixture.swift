@@ -19,7 +19,7 @@ struct IdleCaptureSource: AudioCaptureSource {
 // MARK: - IdleTranscriptionEngine
 
 struct IdleTranscriptionEngine: TranscriptionEngine {
-    func prepare(locale _: Locale, onProgress _: @escaping @Sendable (Double) -> Void) async throws -> AVAudioFormat {
+    func prepare(locales _: [Locale], onProgress _: @escaping @Sendable (Double) -> Void) async throws -> AVAudioFormat {
         throw LayoutFixtureMisuse.audioTouched
     }
 

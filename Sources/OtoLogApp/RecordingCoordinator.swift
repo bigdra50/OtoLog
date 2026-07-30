@@ -45,13 +45,13 @@ import OtoLogCore
     }
 
     func toggle() {
-        let locale = Locale(identifier: settings.localeIdentifier)
-        let translator = makeTranslator()
+        let locales = recognitionLocales()
+        let makeTranslator = translatorFactory()
         Task { [session, state] in
             if state.isRecording {
                 await session.stop()
             } else {
-                await session.start(locale: locale, translator: translator)
+                await session.start(locales: locales, makeTranslator: makeTranslator)
             }
         }
     }
@@ -131,10 +131,7 @@ import OtoLogCore
                 state: Self.describe(before), sessionPath: latestSessionPath()
             )
         }
-        await session.start(
-            locale: Locale(identifier: settings.localeIdentifier),
-            translator: makeTranslator()
-        )
+        await session.start(locales: recognitionLocales(), makeTranslator: translatorFactory())
         let after = await session.state
         if case let .failed(message) = after {
             return ControlResponse(ok: false, error: message, state: Self.describe(after))
@@ -182,14 +179,16 @@ import OtoLogCore
         return false
     }
 
-    /// 翻訳オフ、または翻訳先が認識言語と同じなら nil（訳さない）。
-    /// 記録の開始ごとに作り、設定変更は次の記録から反映される
-    private func makeTranslator() -> (any Translator)? {
+    private func recognitionLocales() -> [Locale] {
+        settings.resolvedRecognitionLocales.map { Locale(identifier: $0) }
+    }
+
+    /// 翻訳器はセグメントのロケールが決まってから作る。自動検出では開始時点で翻訳元が分からない。
+    /// 翻訳オフ、または翻訳先が認識言語と同じときは nil になり、訳さずに記録される
+    private func translatorFactory() -> (@Sendable (String) -> (any Translator)?)? {
         guard settings.translationEnabled else { return nil }
-        return AppleTranslator(
-            sourceLocale: settings.localeIdentifier,
-            targetLocale: settings.resolvedTranslationTarget
-        )
+        let target = settings.resolvedTranslationTarget
+        return { source in AppleTranslator(sourceLocale: source, targetLocale: target) }
     }
 
     /// 制御応答は自動化経路のため utility で足りる
