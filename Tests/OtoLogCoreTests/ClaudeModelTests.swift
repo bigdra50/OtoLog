@@ -20,10 +20,23 @@ struct ClaudeModelTests {
             "--no-session-persistence", "--disable-slash-commands",
         ] + overrides + ["--model", "haiku"])
         #expect(ClaudeCLIGenerator.arguments(model: .sonnet, allowWebResearch: true) == [
-            "-p", "--output-format", "text", "--tools", "WebSearch", "WebFetch",
+            "-p", "--output-format", "text",
+            "--tools", "WebSearch", "WebFetch",
+            "--allowedTools", "WebSearch", "WebFetch",
             "--no-session-persistence", "--disable-slash-commands",
         ] + overrides + ["--model", "sonnet"])
         #expect(ClaudeCLIGenerator.arguments(model: .opus, allowWebResearch: true).contains("opus"))
+    }
+
+    /// --tools はツールを使える状態にするだけで、非対話実行の許可までは与えない。
+    /// --allowedTools が無いと「WebFetch ツールの使用許可が必要です」で弾かれ、
+    /// 用語集や参考資料が Web 検証なしのまま生成される
+    @Test func webResearchGrantsPermissionNotJustAvailability() {
+        let withWeb = ClaudeCLIGenerator.arguments(model: .sonnet, allowWebResearch: true)
+        #expect(withWeb.contains("--allowedTools"))
+
+        let withoutWeb = ClaudeCLIGenerator.arguments(model: .sonnet, allowWebResearch: false)
+        #expect(!withoutWeb.contains("--allowedTools"))
     }
 
     /// 既定引数は「モデル指定なし・Web なし」の合成結果と一致し続ける
