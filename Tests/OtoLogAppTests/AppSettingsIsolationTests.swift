@@ -26,4 +26,24 @@ import Testing
         let settings = AppSettings()
         #expect(!settings.saveDirectoryPath.isEmpty)
     }
+
+    /// 入力欄を空にしたまま閉じると空文字列が残る。?? は nil にしか効かないので、
+    /// そのままだと保存先も claude の起動パスも空のまま使われてしまう
+    @Test func 空文字列で保存されていても既定値へ落とす() {
+        let suite = "OtoLogAppTests.blank-\(UUID().uuidString)"
+        guard let defaults = UserDefaults(suiteName: suite) else {
+            Issue.record("テスト用の defaults を作れなかった")
+            return
+        }
+        defer { defaults.removeSuite(named: suite) }
+        defaults.set("", forKey: "claudeExecutablePath")
+        defaults.set("", forKey: "saveDirectoryPath")
+        defaults.set("", forKey: "localeIdentifier")
+
+        let settings = AppSettings(defaults: defaults)
+
+        #expect(settings.claudeExecutablePath == "~/.local/bin/claude")
+        #expect(settings.saveDirectoryPath == "~/Documents/OtoLog")
+        #expect(settings.localeIdentifier == "ja-JP")
+    }
 }

@@ -20,6 +20,18 @@ enum PostStopAction: String, CaseIterable {
     }
 }
 
+// MARK: - UserDefaults + nonEmptyString
+
+private extension UserDefaults {
+    /// 入力欄を空にしたまま閉じると空文字列が保存される。string(forKey:) はそれを nil にせず返すため、
+    /// `?? 既定値` を素通りして空のまま使われる（保存先が消える、claude が起動できない）。
+    /// 空は未設定と同じ扱いにする
+    func nonEmptyString(forKey key: String) -> String? {
+        guard let value = string(forKey: key), !value.isEmpty else { return nil }
+        return value
+    }
+}
+
 // MARK: - AppSettings
 
 /// UserDefaults 永続化付きの設定。
@@ -29,14 +41,14 @@ enum PostStopAction: String, CaseIterable {
     /// defaults は差し替え可能。テストが実利用中の保存先を書き換えないようにするため
     init(defaults: UserDefaults = .standard) {
         self.defaults = defaults
-        localeIdentifier = defaults.string(forKey: Self.localeKey) ?? "ja-JP"
-        saveDirectoryPath = defaults.string(forKey: Self.directoryKey) ?? "~/Documents/OtoLog"
-        claudeExecutablePath = defaults.string(forKey: Self.claudePathKey) ?? "~/.local/bin/claude"
-        postStopAction = defaults.string(forKey: Self.postStopKey)
+        localeIdentifier = defaults.nonEmptyString(forKey: Self.localeKey) ?? "ja-JP"
+        saveDirectoryPath = defaults.nonEmptyString(forKey: Self.directoryKey) ?? "~/Documents/OtoLog"
+        claudeExecutablePath = defaults.nonEmptyString(forKey: Self.claudePathKey) ?? "~/.local/bin/claude"
+        postStopAction = defaults.nonEmptyString(forKey: Self.postStopKey)
             .flatMap(PostStopAction.init(rawValue:)) ?? .none
-        defaultPlaybookID = defaults.string(forKey: Self.defaultPlaybookKey) ?? Self.autoPlaybookID
+        defaultPlaybookID = defaults.nonEmptyString(forKey: Self.defaultPlaybookKey) ?? Self.autoPlaybookID
         translationEnabled = defaults.bool(forKey: Self.translationEnabledKey)
-        translationTargetIdentifier = defaults.string(forKey: Self.translationTargetKey)
+        translationTargetIdentifier = defaults.nonEmptyString(forKey: Self.translationTargetKey)
             ?? Self.systemTranslationTarget
         // bool(forKey:) は未設定でも false になるため、既定 true は object の有無で判定する
         subtitleOverlayEnabled = defaults.object(forKey: Self.subtitleOverlayKey) as? Bool ?? true
