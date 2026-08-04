@@ -64,7 +64,7 @@ mise run install   # ビルド → ~/Applications/OtoLog.app へ配置 → 起�
 ```
 <保存先>/
   2026-07-29/                       # 日付フォルダ
-    ボクセル技術講演/                # セッション（タイトル名。未タイトルは HHmm、同日重複は -2 連番）
+    週次定例ミーティング/            # セッション（タイトル名。未タイトルは HHmm、同日重複は -2 連番）
       transcript.jsonl              # 正本（1行1確定セグメントの JSON、ISO8601 ミリ秒）
       transcript.md                 # 人が読む用（- **HH:mm:ss** 本文）
       meta.json                     # タイトル・開始/終了時刻・sessionID など
