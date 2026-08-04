@@ -19,7 +19,10 @@ let package = Package(
             dependencies: [
                 "OtoLogCore",
                 .product(name: "MarkdownUI", package: "swift-markdown-ui"),
-            ]
+            ],
+            // mermaid.js は同梱する。CDN から取ると図の描画にネットワークが要り、
+            // オンデバイス完結という前提が崩れる
+            resources: [.copy("Resources/mermaid.min.js")]
         ),
         .executableTarget(name: "otolog-devtool", dependencies: ["OtoLogCore"]),
         .testTarget(name: "OtoLogCoreTests", dependencies: ["OtoLogCore"]),

@@ -32,7 +32,13 @@ struct DocumentMarkdownView: View {
                 .textSelection(.enabled)
             } else {
                 Markdown(content)
-                    .markdownTheme(.gitHub)
+                    .markdownTheme(.otolog)
+                    // 図はセッションディレクトリに置く。相対パスをそこから引けるようにする。
+                    // 単独ブロックと行内で経路が分かれるので両方を差し替える
+                    .markdownImageProvider(SessionImageProvider(baseURL: url.deletingLastPathComponent()))
+                    .markdownInlineImageProvider(
+                        SessionInlineImageProvider(baseURL: url.deletingLastPathComponent())
+                    )
                     .textSelection(.enabled)
                     .padding(16)
                     .frame(maxWidth: .infinity, alignment: .leading)

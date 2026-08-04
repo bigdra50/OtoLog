@@ -112,6 +112,13 @@ struct TranscriptReaderTests {
             for name in ["transcript.md", "transcript.jsonl", "summary.md", "correct.md", "meta.json", "notes.txt"] {
                 try Data("x".utf8).write(to: sessionDir.appendingPathComponent(name))
             }
+            // 作り直す前の版は退避してあるが、生成物の一覧には出さない
+            let history = sessionDir.appendingPathComponent(
+                GenerationHistory.directoryName, isDirectory: true
+            )
+            try FileManager.default.createDirectory(at: history, withIntermediateDirectories: true)
+            try Data("x".utf8).write(to: history.appendingPathComponent("summary-20260729T040000Z.md"))
+
             let names = TranscriptReader(directory: dir, timeZone: jst).generatedDocumentFileNames(in: ref)
             #expect(names.sorted() == ["correct.md", "summary.md"])
         }

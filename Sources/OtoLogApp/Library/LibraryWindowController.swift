@@ -9,6 +9,7 @@ import SwiftUI
 
     init(settings: AppSettings) {
         self.settings = settings
+        generation = LibraryGenerationCoordinator(settings: settings)
     }
 
     // MARK: Internal
@@ -27,7 +28,7 @@ import SwiftUI
             created.center()
             window = created
         }
-        let hosting = NSHostingController(rootView: LibraryView(settings: settings))
+        let hosting = NSHostingController(rootView: LibraryView(settings: settings, generation: generation))
         // SwiftUI の理想サイズでウィンドウが勝手にリサイズされないよう固定し、現在の frame を保つ
         hosting.sizingOptions = []
         let frame = window?.frame
@@ -42,5 +43,7 @@ import SwiftUI
     // MARK: Private
 
     private let settings: AppSettings
+    /// ウィンドウを閉じても生成は続くよう、コントローラ側で持つ
+    private let generation: LibraryGenerationCoordinator
     private var window: NSWindow?
 }
