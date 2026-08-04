@@ -20,11 +20,22 @@ public extension ClaudeCLIGenerator {
     /// 非対話（-p）では許可を尋ねる相手がいないので、--allowedTools を併記しないと
     /// 「WebFetch ツールの使用許可が必要です」で弾かれ、
     /// 用語集や参考資料が Web 検証なしのまま出来上がる（実 CLI v2.1.220 で確認）
-    static func arguments(model: ClaudeModel?, allowWebResearch: Bool) -> [String] {
+    ///
+    /// jsonSchema を渡すと出力が構造化される。Markdown を書かせて読み取る形だと
+    /// 体裁の揺れ（分類見出しの有無など）を後段が吸収しきれないため、
+    /// 機械が使う生成物ではスキーマで固定する
+    static func arguments(
+        model: ClaudeModel?,
+        allowWebResearch: Bool,
+        jsonSchema: String? = nil
+    ) -> [String] {
         var arguments = ["-p", "--output-format", "text"]
         arguments += allowWebResearch
             ? ["--tools", "WebSearch", "WebFetch", "--allowedTools", "WebSearch", "WebFetch"]
             : ["--tools", ""]
+        if let jsonSchema {
+            arguments += ["--json-schema", jsonSchema]
+        }
         arguments += ["--no-session-persistence", "--disable-slash-commands"]
         // 設定遮断と上書きの理由は defaultArguments / overrideSettingsJSON のコメント参照
         arguments += ["--setting-sources", ""]

@@ -8,6 +8,7 @@ struct GenerationTemplateTests {
         #expect(BuiltInTemplates.all.map(\.id) == [
             "correct", "minutes", "lecture", "digest",
             "summary", "glossary", "references", "qa", "repro", "share", "actions", "followup",
+            "situation",
         ])
     }
 

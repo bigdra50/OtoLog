@@ -45,7 +45,7 @@ struct CorrectionExtractorTests {
         let pairs = CorrectionExtractor.pairs(
             original: [
                 Line(time: "17:03:42", text: "美家紋です"),
-                Line(time: "17:04:00", text: "ボクセルの解造を説明"),
+                Line(time: "17:04:00", text: "ボクセルの荒像を説明"),
             ],
             corrected: [
                 Line(time: "17:03:42", text: "美山です"),
@@ -53,6 +53,43 @@ struct CorrectionExtractorTests {
             ]
         )
         #expect(pairs.contains(CorrectionPair(wrong: "家紋", right: "山")))
-        #expect(pairs.contains(CorrectionPair(wrong: "解", right: "構")))
+        #expect(pairs.contains(CorrectionPair(wrong: "荒像", right: "構造")))
+    }
+
+    /// 置換元が1文字のペアは辞書化しない。
+    /// 文脈を選ばず当たってしまい、実辞書では「ご→誤」「ラ→ナ」が最頻出になっていた
+    @Test func ignoresSingleCharacterSources() {
+        let pairs = CorrectionExtractor.pairs(
+            original: [Line(time: "17:03:42", text: "ご認識の可能性があります")],
+            corrected: [Line(time: "17:03:42", text: "誤認識の可能性があります")]
+        )
+        #expect(pairs.isEmpty)
+    }
+
+    /// 記号・空白だけの差分も辞書にしない（句読点の揺れは語の修正ではない）
+    @Test func ignoresPunctuationOnlyChanges() {
+        let pairs = CorrectionExtractor.pairs(
+            original: [Line(time: "17:03:42", text: "これは仕様です。次に進みます")],
+            corrected: [Line(time: "17:03:42", text: "これは仕様です、次に進みます")]
+        )
+        #expect(pairs.isEmpty)
+    }
+
+    /// 置換元が2文字以上なら残す。実辞書で有用だったのはこの形
+    @Test func keepsMultiCharacterSources() {
+        let pairs = CorrectionExtractor.pairs(
+            original: [Line(time: "17:03:42", text: "敷地を超えると破綻します")],
+            corrected: [Line(time: "17:03:42", text: "閾値を超えると破綻します")]
+        )
+        #expect(pairs == [CorrectionPair(wrong: "敷地", right: "閾値")])
+    }
+
+    /// 前後の空白は落として蓄積する（" 10" と "10" が別エントリにならないように）
+    @Test func trimsSurroundingWhitespace() {
+        let pairs = CorrectionExtractor.pairs(
+            original: [Line(time: "17:03:42", text: "残りは 1位ずつ確認します")],
+            corrected: [Line(time: "17:03:42", text: "残りは一意ずつ確認します")]
+        )
+        #expect(pairs.allSatisfy { !$0.wrong.hasPrefix(" ") && !$0.wrong.hasSuffix(" ") })
     }
 }

@@ -53,17 +53,19 @@ struct CorrectionDictionaryTests {
         }
     }
 
-    /// プロンプト注入は複数回観測されたペアだけ（1回きりは文脈依存の可能性）
-    @Test func promptEntriesRequireMinimumCountAndOrderByFrequency() {
+    /// プロンプト注入は信頼度が閾値を超えたものだけ（1回きりの観測は届かない）
+    @Test func promptEntriesFilterByConfidenceAndOrderByIt() {
         var dictionary = CorrectionDictionary()
         let now = Date(timeIntervalSince1970: 1_785_297_600)
         dictionary.entries = [
-            CorrectionEntry(wrong: "一回だけ", right: "一度だけ", count: 1, lastSeenAt: now),
-            CorrectionEntry(wrong: "家紋", right: "山", count: 3, lastSeenAt: now),
-            CorrectionEntry(wrong: "解", right: "構", count: 2, lastSeenAt: now),
+            CorrectionEntry(wrong: "一回だけ", right: "一度だけ", count: 1, firstSeenAt: now, lastSeenAt: now),
+            CorrectionEntry(wrong: "家紋", right: "山", count: 3, firstSeenAt: now, lastSeenAt: now),
+            CorrectionEntry(wrong: "荒像", right: "構造", count: 2, firstSeenAt: now, lastSeenAt: now),
         ]
-        let entries = dictionary.promptEntries(minimumCount: 2, limit: 10)
-        #expect(entries.map(\.wrong) == ["家紋", "解"])
+
+        let entries = dictionary.promptEntries(limit: 10, asOf: now)
+
+        #expect(entries.map(\.wrong) == ["家紋", "荒像"])
     }
 
     @Test func loadReturnsEmptyDictionaryForMissingOrBrokenFile() throws {
@@ -74,6 +76,78 @@ struct CorrectionDictionaryTests {
             let brokenURL = dir.appendingPathComponent("broken.json")
             try "{broken".write(to: brokenURL, atomically: true, encoding: .utf8)
             #expect(CorrectionDictionaryStore(fileURL: brokenURL).load() == CorrectionDictionary())
+        }
+    }
+
+    /// 基準を厳しくする前に貯まったエントリは読み込み時に落とす。
+    /// 実辞書では「ご→誤」が 39 回で最頻出になり、有用なエントリを押しのけていた
+    @Test func loadDropsEntriesThatNoLongerQualify() throws {
+        try withTempDir { dir in
+            let url = dir.appendingPathComponent("corrections.json")
+            let store = CorrectionDictionaryStore(fileURL: url)
+            let now = Date(timeIntervalSince1970: 1_785_297_600)
+            try store.save(CorrectionDictionary(entries: [
+                CorrectionEntry(wrong: "ご", right: "誤", count: 39, firstSeenAt: now, lastSeenAt: now),
+                CorrectionEntry(wrong: "。", right: "、", count: 8, firstSeenAt: now, lastSeenAt: now),
+                CorrectionEntry(wrong: "敷地", right: "閾値", count: 12, firstSeenAt: now, lastSeenAt: now),
+            ]))
+
+            let loaded = store.load()
+
+            #expect(loaded.entries.map(\.wrong) == ["敷地"])
+        }
+    }
+
+    /// 人のチェック結果は書き戻して永続化する
+    @Test func reviewMarksEntryAndPersists() throws {
+        try withTempDir { dir in
+            let url = dir.appendingPathComponent("corrections.json")
+            let store = CorrectionDictionaryStore(fileURL: url)
+            let now = Date(timeIntervalSince1970: 1_785_297_600)
+            _ = try store.record([CorrectionPair(wrong: "敷地", right: "閾値")], now: now)
+
+            _ = try store.review(wrong: "敷地", right: "閾値", as: .confirmed, now: now)
+
+            let entry = try #require(store.load().entries.first)
+            #expect(entry.review == .confirmed)
+            #expect(entry.reviewedAt == now)
+            #expect(entry.confidence(asOf: now) == 1.0)
+        }
+    }
+
+    /// 却下したエントリは残す。消すと再学習で未チェックとして戻ってきてしまう
+    @Test func rejectedEntriesSurviveAndStayOutOfPrompts() throws {
+        try withTempDir { dir in
+            let url = dir.appendingPathComponent("corrections.json")
+            let store = CorrectionDictionaryStore(fileURL: url)
+            let now = Date(timeIntervalSince1970: 1_785_297_600)
+            _ = try store.record([CorrectionPair(wrong: "鎌倉", right: "かまくら")], now: now)
+            _ = try store.review(wrong: "鎌倉", right: "かまくら", as: .rejected, now: now)
+
+            // 同じ誤りをまた観測しても、却下の判断は上書きされない
+            let dictionary = try store.record([CorrectionPair(wrong: "鎌倉", right: "かまくら")], now: now)
+
+            #expect(dictionary.entries.first?.review == .rejected)
+            #expect(dictionary.promptEntries(asOf: now).isEmpty)
+        }
+    }
+
+    /// 上限を超えても人が判断したものは残す。自動で貯まった分から捨てる
+    @Test func prunesUnreviewedEntriesBeforeReviewedOnes() throws {
+        try withTempDir { dir in
+            let url = dir.appendingPathComponent("corrections.json")
+            let store = CorrectionDictionaryStore(fileURL: url, maxEntries: 2)
+            let base = Date(timeIntervalSince1970: 1_785_297_600)
+            _ = try store.record([CorrectionPair(wrong: "あ誤1", right: "正1")], now: base)
+            _ = try store.review(wrong: "あ誤1", right: "正1", as: .confirmed, now: base)
+            _ = try store.record([CorrectionPair(wrong: "い誤2", right: "正2")], now: base.addingTimeInterval(60))
+
+            let dictionary = try store.record(
+                [CorrectionPair(wrong: "う誤3", right: "正3")], now: base.addingTimeInterval(120)
+            )
+
+            #expect(dictionary.entries.contains { $0.wrong == "あ誤1" })
+            #expect(dictionary.entries.count == 2)
         }
     }
 

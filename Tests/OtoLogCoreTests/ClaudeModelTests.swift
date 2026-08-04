@@ -44,4 +44,19 @@ struct ClaudeModelTests {
         #expect(ClaudeCLIGenerator.defaultArguments
             == ClaudeCLIGenerator.arguments(model: nil, allowWebResearch: false))
     }
+
+    /// スキーマ付きのタスクは --json-schema を渡す。
+    /// Markdown を書かせてパースすると体裁の揺れを拾いきれない
+    @Test func passesJSONSchemaWhenTemplateDefinesOne() {
+        let schema = #"{"type":"object"}"#
+
+        let args = ClaudeCLIGenerator.arguments(model: .sonnet, allowWebResearch: false, jsonSchema: schema)
+
+        #expect(args.contains("--json-schema"))
+        #expect(args.contains(schema))
+    }
+
+    @Test func omitsJSONSchemaWhenAbsent() {
+        #expect(!ClaudeCLIGenerator.arguments(model: .sonnet, allowWebResearch: false).contains("--json-schema"))
+    }
 }

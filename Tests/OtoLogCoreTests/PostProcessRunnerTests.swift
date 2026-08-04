@@ -49,6 +49,24 @@ struct PostProcessRunnerTests {
         }
     }
 
+    /// 置き換えた前の版は履歴に残す。作り直して出来が落ちたときに見比べる先がないと困る
+    @Test func rerunKeepsPreviousVersionInHistory() async throws {
+        try await withTempDir { dir in
+            try writeTranscript(["こんにちは"], to: dir)
+            let generator = FakeTextGenerator(result: "1回目")
+            let runner = makeRunner(directory: dir, generator: generator)
+
+            _ = try await runner.run(session: session, template: template)
+            generator.result = "2回目"
+            let url = try await runner.run(session: session, template: template)
+
+            let versions = GenerationHistory.versions(of: "minutes.md", in: url.deletingLastPathComponent())
+            #expect(versions.count == 1)
+            let previous = try versions.first.map { try String(contentsOf: $0, encoding: .utf8) }
+            #expect(previous?.contains("1回目") == true)
+        }
+    }
+
     /// モデルが指示に反して全体をコードフェンスで包んだ場合に備える安価な堅牢化
     @Test func stripsWrappingCodeFence() async throws {
         try await withTempDir { dir in
@@ -90,12 +108,23 @@ struct PostProcessRunnerTests {
         }
     }
 
+    /// 退避した版が「いつ作られたか」は由来コメントにしか残らない
+    @Test func readsGeneratedAtFromProvenanceHeader() {
+        let header = "<!-- otolog:generated template=minutes source=transcript.jsonl "
+            + "generatedAt=2026-07-29T04:00:00Z -->\n\n本文"
+        #expect(
+            PostProcessRunner.provenanceGeneratedAt(header) == Date(timeIntervalSince1970: 1_785_297_600)
+        )
+        #expect(PostProcessRunner.provenanceGeneratedAt("本文だけ") == nil)
+    }
+
     // MARK: Private
 
     private func makeRunner(directory: URL, generator: FakeTextGenerator) -> PostProcessRunner {
         PostProcessRunner(
             directory: directory, timeZone: jst, generator: generator,
-            correctionStore: nil, // テストから実 config を汚さない
+            // テストから実 config を読み書きしない。既定のままだと結果が手元の設定に依存する
+            correctionStore: nil, knowledgeStore: nil, situationStore: nil,
             now: { Date(timeIntervalSince1970: 1_785_297_600) }
         )
     }

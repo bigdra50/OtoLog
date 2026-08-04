@@ -7,9 +7,18 @@ import Foundation
 public struct GenerationTemplate: Sendable, Equatable, Identifiable {
     // MARK: Lifecycle
 
-    public init(id: String, displayName: String, instructions: String, isBuiltIn: Bool) {
+    public init(
+        id: String,
+        displayName: String,
+        instructions: String,
+        isBuiltIn: Bool,
+        jsonSchema: String? = nil,
+        allowsWebResearch: Bool = false
+    ) {
         self.id = id
         self.displayName = displayName
+        self.jsonSchema = jsonSchema
+        self.allowsWebResearch = allowsWebResearch
         self.instructions = instructions
         self.isBuiltIn = isBuiltIn
     }
@@ -20,6 +29,12 @@ public struct GenerationTemplate: Sendable, Equatable, Identifiable {
     public let displayName: String
     public let instructions: String
     public let isBuiltIn: Bool
+    /// 構造化出力のスキーマ。機械が後で使う生成物にだけ与える
+    /// （議事録や要約は自由記述のほうが質が出るので付けない）
+    public let jsonSchema: String?
+    /// 単発生成でも Web 検索を許すか。
+    /// 「定義は Web 検索で確認し」と指示しているテンプレートを検索なしで走らせても指示どおりに動かない
+    public let allowsWebResearch: Bool
 }
 
 // MARK: - BuiltInTemplates
@@ -31,7 +46,7 @@ public enum BuiltInTemplates {
 
     public static let all: [GenerationTemplate] = [
         correct, minutes, lecture, digest,
-        summary, glossary, references, qa, repro, share, actions, followup,
+        summary, glossary, references, qa, repro, share, actions, followup, situation,
     ]
 
     // MARK: Internal
@@ -68,7 +83,7 @@ public enum BuiltInTemplates {
         instructions: """
         文字起こしログを講義ノートに整理する。
         - 内容を見出し階層で構造化する
-        - 重要用語は太字にし、ログ内の説明に基づく短い定義を添える
+        - 重要用語は見出しを立て、ログ内の説明に基づく短い定義を添える
         - 箇条書き中心で、例・数値はログから正確に引き写す
         - 末尾に「復習ポイント」節を置き、理解を確認する問いを3〜5個書く
         """,
@@ -104,14 +119,24 @@ public enum BuiltInTemplates {
         id: "glossary",
         displayName: "用語集",
         instructions: """
-        文字起こしログから専門用語・技術名を抽出し、用語集を作る。
-        - 用語ごとに「ログ内での文脈（どう使われたか）」と「正確な定義」を書く
-        - 定義は Web 検索で確認し、参照した URL を添える
-        - 音声認識による表記の揺れ・誤りは正しい表記に直して見出しにする
+        文字起こしログから専門用語・技術名を抽出し、用語集を JSON で出力する。
+        - term は用語そのもの。分類やカテゴリ（「AI関連」など）を term にしない
+        - context はログ内でどう使われたかを1〜2文で
+        - definition は一般的な定義を1〜2文で。前提知識として持ち回るので簡潔にする
+        - definition は Web 検索で確認し、参照した URL を reference に入れる。http(s) で始まる実在の URL のみ。確認できなければ reference を省く
+        - 音声認識による表記の揺れ・誤りは正しい表記に直して term にする
         - 一般的すぎる語は含めず、この内容の理解に効く用語に絞る
         """,
-        isBuiltIn: true
+        isBuiltIn: true,
+        jsonSchema: glossarySchema,
+        allowsWebResearch: true
     )
+
+    /// 用語集の構造化出力スキーマ。
+    /// definition に上限を置くのは、前提知識として毎回プロンプトへ乗るため
+    static let glossarySchema = """
+    {"type":"object","properties":{"terms":{"type":"array","items":{"type":"object",    "properties":{"term":{"type":"string","maxLength":60},    "context":{"type":"string","maxLength":200},    "definition":{"type":"string","maxLength":200},    "reference":{"type":"string"}},    "required":["term","context","definition"],"additionalProperties":false}}},    "required":["terms"],"additionalProperties":false}
+    """
 
     static let references = GenerationTemplate(
         id: "references",
@@ -122,7 +147,8 @@ public enum BuiltInTemplates {
         - 「ログ内でどう言及されたか」を1行で添える
         - 特定できなかったものは「未特定」節に分けて残す（URL を創作しない）
         """,
-        isBuiltIn: true
+        isBuiltIn: true,
+        allowsWebResearch: true
     )
 
     static let qa = GenerationTemplate(
@@ -147,7 +173,8 @@ public enum BuiltInTemplates {
         - 「手順の再構成」節で、ログの説明から実施手順を段階的に組み立てる。ログに無い部分は［要調査］と明示する
         - 「実現可能性の評価」節で、難易度・所要時間・不確実な点を評価する
         """,
-        isBuiltIn: true
+        isBuiltIn: true,
+        allowsWebResearch: true
     )
 
     static let share = GenerationTemplate(
@@ -167,11 +194,42 @@ public enum BuiltInTemplates {
         id: "actions",
         displayName: "アクションアイテム",
         instructions: """
-        文字起こしログからアクションアイテムを抽出する。
-        - 「やること」をチェックリスト形式（- [ ]）で列挙する
-        - ログ内で言及がある場合のみ担当者・期限を添える
-        - 決定に基づくものと提案止まりのものを分けて整理する
+        文字起こしログからアクションアイテムを抽出し、JSON で出力する。
+        - task は「やること」を1文で
+        - owner・due はログ内で言及がある場合のみ入れる。言及が無ければ省く（推測して埋めない）
+        - at は発言時刻 [HH:mm:ss] の時刻部分。どこで決まったか辿れるようにする
+        - decided は決定に基づくものだけ true。提案・検討止まりは false
         - ログに無いタスクを創作しない
+        """,
+        isBuiltIn: true,
+        jsonSchema: actionsSchema
+    )
+
+    /// アクションアイテムの構造化出力スキーマ。
+    /// 完了チェックや外部への書き出しに使うので、型を固定する
+    static let actionsSchema = """
+    {"type":"object","properties":{"actions":{"type":"array","items":{"type":"object",\
+    "properties":{"task":{"type":"string","maxLength":200},\
+    "owner":{"type":"string","maxLength":40},\
+    "due":{"type":"string","maxLength":40},\
+    "at":{"type":"string","pattern":"^[0-9]{2}:[0-9]{2}:[0-9]{2}$"},\
+    "decided":{"type":"boolean"}},\
+    "required":["task"],"additionalProperties":false}}},\
+    "required":["actions"],"additionalProperties":false}
+    """
+
+    static let situation = GenerationTemplate(
+        id: "situation",
+        displayName: "現況メモの更新",
+        instructions: """
+        「現在の現況メモ」を、今回のログで分かったことを踏まえて更新し、更新後の全文を出力する。
+        - 主題（人・案件・プロジェクト）ごとに `##` 見出しを立てて書く
+        - 今回のログで触れられた主題だけを書き換える。触れられていない主題は現在の記述をそのまま残す
+        - 新しく出てきた主題は追加する
+        - 各主題の末尾に `（YYYY-MM-DD 時点）` を添える。日付はセッションの開始日
+        - 状態・関係・温度感など、型にはめられない事柄を短く書く。用語の定義は書かない
+        - 完了したこと・終わった案件は削らず「完了」と分かる形で残す
+        - 現在の現況メモが空なら、今回のログから分かる範囲で新規に書く
         """,
         isBuiltIn: true
     )

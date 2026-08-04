@@ -36,7 +36,15 @@ import OtoLogCore
         let runner = PostProcessRunner(
             directory: settings.saveDirectory,
             timeZone: .current,
-            generator: ClaudeCLIGenerator(executableURL: settings.claudeExecutableURL)
+            // スキーマ付きのテンプレートは構造化出力で受け取る
+            generator: ClaudeCLIGenerator(
+                executableURL: settings.claudeExecutableURL,
+                arguments: ClaudeCLIGenerator.arguments(
+                    model: nil,
+                    allowWebResearch: template.allowsWebResearch,
+                    jsonSchema: template.jsonSchema
+                )
+            )
         )
         generationTask = Task { [state] in
             do {

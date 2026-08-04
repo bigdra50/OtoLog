@@ -17,16 +17,50 @@ public struct CorrectionPair: Sendable, Equatable, Hashable {
     public let right: String
 }
 
+// MARK: - CorrectionReview
+
+/// 人によるチェックの状態。未チェックでも補正には使う（初回から効かせるため）。
+public enum CorrectionReview: String, Sendable, Codable, CaseIterable {
+    case unreviewed
+    case confirmed
+    case rejected
+}
+
 // MARK: - CorrectionEntry
 
 public struct CorrectionEntry: Sendable, Equatable, Codable {
     // MARK: Lifecycle
 
-    public init(wrong: String, right: String, count: Int, lastSeenAt: Date) {
+    public init(
+        wrong: String,
+        right: String,
+        count: Int,
+        firstSeenAt: Date,
+        lastSeenAt: Date,
+        review: CorrectionReview = .unreviewed,
+        reviewedAt: Date? = nil
+    ) {
         self.wrong = wrong
         self.right = right
         self.count = count
+        self.firstSeenAt = firstSeenAt
         self.lastSeenAt = lastSeenAt
+        self.review = review
+        self.reviewedAt = reviewedAt
+    }
+
+    /// review と firstSeenAt が入る前に書かれた辞書も読めるようにする。
+    /// 既存の学習を捨てずに済ませるため、欠けている項目は既定へ寄せる
+    public init(from decoder: any Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        wrong = try container.decode(String.self, forKey: .wrong)
+        right = try container.decode(String.self, forKey: .right)
+        count = try container.decode(Int.self, forKey: .count)
+        lastSeenAt = try container.decode(Date.self, forKey: .lastSeenAt)
+        // 初出が不明なので最終観測に寄せる。生存期間は 0 から数え直しになる
+        firstSeenAt = try container.decodeIfPresent(Date.self, forKey: .firstSeenAt) ?? lastSeenAt
+        review = try container.decodeIfPresent(CorrectionReview.self, forKey: .review) ?? .unreviewed
+        reviewedAt = try container.decodeIfPresent(Date.self, forKey: .reviewedAt)
     }
 
     // MARK: Public
@@ -34,7 +68,44 @@ public struct CorrectionEntry: Sendable, Equatable, Codable {
     public var wrong: String
     public var right: String
     public var count: Int
+    /// 生存期間の起点。長く残っているほど「否定されなかった」ことの裏づけになる
+    public var firstSeenAt: Date
     public var lastSeenAt: Date
+    public var review: CorrectionReview
+    public var reviewedAt: Date?
+
+    /// 補正へ効かせてよい度合い（0...1）。
+    ///
+    /// 人が確認したものは 1、否定したものは 0。未チェックは 0.3 から始まり、
+    /// 観測回数と生存期間で上がるが確認済みには追いつかない。
+    /// 「はっきり突っ込まれていないから、たぶん間違いではない」を数値にしたもの
+    public func confidence(asOf now: Date) -> Double {
+        switch review {
+        case .confirmed: 1.0
+        case .rejected: 0
+        case .unreviewed:
+            min(
+                Self.unreviewedCeiling,
+                Self.unreviewedBase + observationBonus + survivalBonus(asOf: now)
+            )
+        }
+    }
+
+    // MARK: Private
+
+    private static let unreviewedBase = 0.3
+    private static let unreviewedCeiling = 0.8
+
+    /// 何度も同じ直され方をしているほど確からしい。効きは対数で頭打ちにする
+    private var observationBonus: Double {
+        min(0.3, 0.1 * log2(Double(max(count, 1))))
+    }
+
+    /// 10 週生き延びれば上限。それ以上は回数で差をつける
+    private func survivalBonus(asOf now: Date) -> Double {
+        let weeks = max(0, now.timeIntervalSince(firstSeenAt)) / (7 * 24 * 60 * 60)
+        return min(0.2, 0.02 * weeks)
+    }
 }
 
 // MARK: - CorrectionDictionary
@@ -54,16 +125,21 @@ public struct CorrectionDictionary: Sendable, Equatable, Codable {
     public var schemaVersion: Int
     public var entries: [CorrectionEntry]
 
-    /// プロンプト注入用のエントリ。複数回観測されたものだけを頻度順で返す
-    /// （1回きりの修正は文脈依存の可能性があるため注入しない）
-    public func promptEntries(minimumCount: Int = 2, limit: Int = 50) -> [CorrectionEntry] {
-        entries
-            .filter { $0.count >= minimumCount }
-            .sorted { lhs, rhs in
-                lhs.count != rhs.count ? lhs.count > rhs.count : lhs.wrong < rhs.wrong
-            }
-            .prefix(limit)
-            .map(\.self)
+    /// プロンプト注入用のエントリ。信頼度の高い順に返す。
+    /// 既定の閾値は「未チェックで2回観測」に相当し、人が否定したものは必ず外れる
+    public func promptEntries(
+        minimumConfidence: Double = 0.4,
+        limit: Int = 50,
+        asOf now: Date = Date()
+    ) -> [CorrectionEntry] {
+        let scored: [(entry: CorrectionEntry, confidence: Double)] = entries
+            .map { (entry: $0, confidence: $0.confidence(asOf: now)) }
+            .filter { $0.confidence >= minimumConfidence }
+        let ordered = scored.sorted { lhs, rhs in
+            if lhs.confidence != rhs.confidence { return lhs.confidence > rhs.confidence }
+            return lhs.entry.wrong < rhs.entry.wrong
+        }
+        return ordered.prefix(limit).map(\.entry)
     }
 }
 
@@ -89,11 +165,18 @@ public struct CorrectionDictionaryStore: Sendable {
         return base.appendingPathComponent("otolog/corrections.json")
     }
 
-    /// 破損・欠損は空辞書（学習をやり直せば済む派生データのため）
+    /// 破損・欠損は空辞書（学習をやり直せば済む派生データのため）。
+    ///
+    /// 読み込み時に現在の基準で濾す。基準を厳しくする前に貯まったエントリ
+    /// （「ご→誤」のような1文字ペア）が残っていると、信頼度を計算しても
+    /// 観測回数だけは多いので上位に居座り続ける
     public func load() -> CorrectionDictionary {
         guard let data = try? Data(contentsOf: fileURL),
-              let dictionary = try? decoder().decode(CorrectionDictionary.self, from: data)
+              var dictionary = try? decoder().decode(CorrectionDictionary.self, from: data)
         else { return CorrectionDictionary() }
+        dictionary.entries.removeAll { entry in
+            CorrectionPair(text: entry.wrong, replacement: entry.right) == nil
+        }
         return dictionary
     }
 
@@ -121,7 +204,10 @@ public struct CorrectionDictionaryStore: Sendable {
                 dictionary.entries[index].lastSeenAt = now
             } else {
                 dictionary.entries.append(
-                    CorrectionEntry(wrong: pair.wrong, right: pair.right, count: 1, lastSeenAt: now)
+                    CorrectionEntry(
+                        wrong: pair.wrong, right: pair.right, count: 1,
+                        firstSeenAt: now, lastSeenAt: now
+                    )
                 )
             }
         }
@@ -133,12 +219,33 @@ public struct CorrectionDictionaryStore: Sendable {
         }
 
         if dictionary.entries.count > maxEntries {
-            dictionary.entries = dictionary.entries
+            // 人が判断した分は残す。自動で貯まったものから古い順に捨てる。
+            // 却下を捨てると、同じ誤りを観測したときに未チェックとして戻ってきてしまう
+            let reviewed = dictionary.entries.filter { $0.review != .unreviewed }
+            let unreviewed = dictionary.entries
+                .filter { $0.review == .unreviewed }
                 .sorted { $0.lastSeenAt > $1.lastSeenAt }
-                .prefix(maxEntries)
-                .map(\.self)
+            let room = max(0, maxEntries - reviewed.count)
+            dictionary.entries = reviewed + unreviewed.prefix(room)
         }
 
+        try save(dictionary)
+        return dictionary
+    }
+
+    /// 人によるチェック結果を書き戻す。該当が無ければ何もしない
+    @discardableResult public func review(
+        wrong: String,
+        right: String,
+        as review: CorrectionReview,
+        now: Date
+    ) throws -> CorrectionDictionary {
+        var dictionary = load()
+        guard let index = dictionary.entries.firstIndex(where: {
+            $0.wrong == wrong && $0.right == right
+        }) else { return dictionary }
+        dictionary.entries[index].review = review
+        dictionary.entries[index].reviewedAt = review == .unreviewed ? nil : now
         try save(dictionary)
         return dictionary
     }

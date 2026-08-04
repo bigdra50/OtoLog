@@ -45,18 +45,31 @@ public enum CorrectionExtractor {
     private static let maxPairLength = 12
 }
 
-private extension CorrectionPair {
-    /// 辞書化に適さないペアは nil
+extension CorrectionPair {
+    /// 辞書化に適さないペアは nil。
+    ///
+    /// 置換元が1文字のものを落とすのが要点。実辞書では「ご→誤」「ラ→ナ」「デ→レ」が
+    /// 最頻出になっていて、文脈を選ばず当たるうえに有用なエントリを頻度順で押しのけていた。
+    /// 置換先は1文字でもよい（「家紋→山」のような固有名詞の補正が該当する）
     init?(text wrong: String, replacement right: String) {
-        guard !wrong.isEmpty, !right.isEmpty,
+        // 既存辞書の濾過（CorrectionDictionaryStore.load）からも同じ基準で呼ばれる
+        let wrong = wrong.trimmingCharacters(in: .whitespaces)
+        let right = right.trimmingCharacters(in: .whitespaces)
+        guard wrong.count >= 2, !right.isEmpty,
               wrong.count <= 12, right.count <= 12,
-              !(wrong.isHiraganaOnly && right.isHiraganaOnly)
+              !(wrong.isHiraganaOnly && right.isHiraganaOnly),
+              wrong.hasLetterOrDigit, right.hasLetterOrDigit
         else { return nil }
         self.init(wrong: wrong, right: right)
     }
 }
 
 private extension String {
+    /// 記号・空白だけの差分（句読点の揺れ）は語の修正ではないので辞書化しない
+    var hasLetterOrDigit: Bool {
+        unicodeScalars.contains { $0.properties.isAlphabetic || ("0"..."9").contains(Character($0)) }
+    }
+
     var isHiraganaOnly: Bool {
         !isEmpty && unicodeScalars.allSatisfy { scalar in
             (0x3040...0x309F).contains(Int(scalar.value)) || scalar.properties.isWhitespace

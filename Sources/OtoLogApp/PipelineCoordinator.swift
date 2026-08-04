@@ -66,6 +66,11 @@ import OtoLogCore
         }
 
         let executableURL = settings.claudeExecutableURL
+        // テンプレート側のスキーマを引いて構造化出力の可否を決める
+        let schemas = Dictionary(
+            TemplateStore().loadTemplates().map { ($0.id, $0.jsonSchema) },
+            uniquingKeysWith: { first, _ in first }
+        )
         let runner = PipelineRunner(
             saveDirectory: settings.saveDirectory,
             timeZone: .current,
@@ -73,7 +78,9 @@ import OtoLogCore
                 ClaudeCLIGenerator(
                     executableURL: executableURL,
                     arguments: ClaudeCLIGenerator.arguments(
-                        model: task.model, allowWebResearch: task.allowsWebResearch
+                        model: task.model,
+                        allowWebResearch: task.allowsWebResearch,
+                        jsonSchema: schemas[task.templateID] ?? nil
                     )
                 )
             }
