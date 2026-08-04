@@ -8,14 +8,14 @@ struct MarkdownFormatterTests {
     /// 1_785_297_600 = 2026-07-29T04:00:00Z = 13:00:00 JST
     let finalizedAt = Date(timeIntervalSince1970: 1_785_297_600)
 
-    func makeSegment(text: String) -> TranscriptSegment {
+    func makeSegment(text: String, source: AudioSourceKind = .system) -> TranscriptSegment {
         TranscriptSegment(
             text: text,
             audioStart: nil,
             audioEnd: nil,
             finalizedAt: finalizedAt,
             locale: "ja-JP",
-            source: .system,
+            source: source,
             sessionID: UUID(uuidString: "00000000-0000-0000-0000-000000000001")!,
             sessionStartedAt: finalizedAt
         )
@@ -67,5 +67,21 @@ struct MarkdownFormatterTests {
         let line = formatter.line(for: segment)
 
         #expect(line == "- **13:00:00** こんにちは\n")
+    }
+
+    /// マイク由来（＝話者本人）の発言は「自分:」で区別する。
+    /// システム音声側は従来表記のまま（会議以外の記録を話者ラベルで汚さない）
+    @Test func prefixesMicrophoneSegmentWithSpeakerLabel() {
+        let line = formatter.line(for: makeSegment(text: "承知しました", source: .microphone))
+        #expect(line == "- **13:00:00** 自分: 承知しました\n")
+    }
+
+    @Test func keepsTranslationChildLineForMicrophoneSegment() {
+        var segment = makeSegment(text: "承知しました", source: .microphone)
+        segment.translation = "Understood"
+
+        let line = formatter.line(for: segment)
+
+        #expect(line == "- **13:00:00** 自分: 承知しました\n  - Understood\n")
     }
 }

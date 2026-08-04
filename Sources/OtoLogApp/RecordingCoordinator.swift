@@ -27,12 +27,9 @@ import OtoLogCore
 
     static func makeDefault(state: AppState, settings: AppSettings) -> RecordingCoordinator {
         let store = SessionFileStore(directory: settings.saveDirectory, timeZone: .current)
-        let session = RecordingSession(
-            capture: ProcessTapCaptureSource(),
-            engine: SpeechAnalyzerEngine(),
-            store: store
+        return RecordingCoordinator(
+            session: RecordingSession(store: store), store: store, state: state, settings: settings
         )
-        return RecordingCoordinator(session: session, store: store, state: state, settings: settings)
     }
 
     func startObserving() {
@@ -47,11 +44,12 @@ import OtoLogCore
     func toggle() {
         let locales = recognitionLocales()
         let makeTranslator = translatorFactory()
+        let feeds = makeFeeds()
         Task { [session, state] in
             if state.isRecording {
                 await session.stop()
             } else {
-                await session.start(locales: locales, makeTranslator: makeTranslator)
+                await session.start(feeds: feeds, locales: locales, makeTranslator: makeTranslator)
             }
         }
     }
@@ -131,7 +129,9 @@ import OtoLogCore
                 state: Self.describe(before), sessionPath: latestSessionPath()
             )
         }
-        await session.start(locales: recognitionLocales(), makeTranslator: translatorFactory())
+        await session.start(
+            feeds: makeFeeds(), locales: recognitionLocales(), makeTranslator: translatorFactory()
+        )
         let after = await session.state
         if case let .failed(message) = after {
             return ControlResponse(ok: false, error: message, state: Self.describe(after))
@@ -181,6 +181,26 @@ import OtoLogCore
 
     private func recognitionLocales() -> [Locale] {
         settings.resolvedRecognitionLocales.map { Locale(identifier: $0) }
+    }
+
+    /// 設定の入力モードからフィード（キャプチャ + エンジンの対）を組む。
+    /// キャプチャとエンジンは開始のたびに新規生成し、前回セッションの状態を持ち越さない
+    private func makeFeeds() -> [RecordingFeed] {
+        let mode = settings.audioInputMode
+        var feeds: [RecordingFeed] = []
+        if mode != .microphoneOnly {
+            feeds.append(RecordingFeed(
+                capture: ProcessTapCaptureSource(), engine: SpeechAnalyzerEngine(), kind: .system
+            ))
+        }
+        if mode.usesMicrophone {
+            feeds.append(RecordingFeed(
+                capture: MicrophoneCaptureSource(deviceUID: settings.microphoneDeviceUID),
+                engine: SpeechAnalyzerEngine(),
+                kind: .microphone
+            ))
+        }
+        return feeds
     }
 
     /// 翻訳器はセグメントのロケールが決まってから作る。自動検出では開始時点で翻訳元が分からない。

@@ -1,30 +1,46 @@
 @preconcurrency import AVFAudio
 import Foundation
 
+// MARK: - RecordingFeed
+
+/// 1音源ぶんの録音構成。キャプチャとエンジンは1:1で対にする。
+/// エンジンの start は1セッション1回の規約があり、複数音源で共有できない。
+/// kind はセグメントの source（話者区別の根拠）としてそのまま保存される
+public struct RecordingFeed: Sendable {
+    // MARK: Lifecycle
+
+    public init(capture: any AudioCaptureSource, engine: any TranscriptionEngine, kind: AudioSourceKind) {
+        self.capture = capture
+        self.engine = engine
+        self.kind = kind
+    }
+
+    // MARK: Public
+
+    public let capture: any AudioCaptureSource
+    public let engine: any TranscriptionEngine
+    public let kind: AudioSourceKind
+}
+
 // MARK: - RecordingSession
 
-/// パイプライン統括。キャプチャ → エンジン → ストアを束ね、UI へ SessionEvent を流す。
+/// パイプライン統括。フィード（キャプチャ + エンジン）の組を束ね、
+/// 確定セグメントを1つのストアへ集約して UI へ SessionEvent を流す。
 ///
 /// チャンクはエンジンへ直結せずセッションが中継する。
 /// キャプチャストリームの異常終了をここで検知し、エンジンを生かしたまま
-/// キャプチャだけを再起動できるようにするため。
+/// そのフィードのキャプチャだけを再起動できるようにするため。
 public actor RecordingSession {
     // MARK: Lifecycle
 
     public init(
-        capture: any AudioCaptureSource,
-        engine: any TranscriptionEngine,
         store: any TranscriptStore,
         translationTimeout: Duration = .seconds(10),
-        source: AudioSourceKind = .system,
         now: @escaping @Sendable () -> Date = { Date() },
         makeSessionID: @escaping @Sendable () -> UUID = { UUID() }
     ) {
-        self.capture = capture
-        self.engine = engine
         self.store = store
         self.translationTimeout = translationTimeout
-        self.source = source
         self.now = now
         self.makeSessionID = makeSessionID
         let (stream, continuation) = AsyncStream.makeStream(of: SessionEvent.self)
@@ -39,67 +55,67 @@ public actor RecordingSession {
 
     public private(set) var state: SessionState = .idle
 
-    /// locales を複数渡すと、話されている言語をエンジンが選ぶ。先頭は判定できなかったときの既定。
+    /// feeds の全フィードを同じセッション（同じ保存先）として起動する。
+    /// どれか1つでも起動に失敗したら全体を failed にする（欠けた音源に気づかないまま録り続けない）。
+    ///
+    /// locales を複数渡すと、話されている言語を各エンジンが選ぶ。先頭は判定できなかったときの既定。
     ///
     /// makeTranslator はセグメントのロケールを受けて翻訳器を作る。自動検出では開始時点で
     /// 翻訳元が決まらないため、生成を確定セグメントまで遅らせる。
     /// nil を返したロケールは訳さない（翻訳先が認識言語と同じ場合など）
     public func start(
+        feeds: [RecordingFeed],
         locales: [Locale],
         makeTranslator: (@Sendable (String) -> (any Translator)?)? = nil
     ) async {
-        guard canStart, let primary = locales.first else { return }
+        guard canStart, !feeds.isEmpty, let primary = locales.first else { return }
         cleanUpPreviousRun()
         self.makeTranslator = makeTranslator
         translatorCache.removeAll()
         setState(.preparing)
 
         let continuation = eventContinuation
-        let format: AVAudioFormat
-        do {
-            format = try await engine.prepare(locales: locales, onProgress: { progress in
-                continuation.yield(.preparationProgress(progress))
-            })
-        } catch {
-            setState(.failed(error.localizedDescription))
-            return
+        // 認識モデルの確保はフィードごとに直列で行う。アセットはシステム共有のため
+        // 2本目以降のダウンロードは実質即時に終わる（進捗が混ざって表示される心配はない）
+        var formats: [AVAudioFormat] = []
+        for feed in feeds {
+            do {
+                let format = try await feed.engine.prepare(locales: locales, onProgress: { progress in
+                    continuation.yield(.preparationProgress(progress))
+                })
+                formats.append(format)
+            } catch {
+                setState(.failed(error.localizedDescription))
+                return
+            }
         }
-        analyzerFormat = format
 
-        let (chunkStream, chunkContinuation) = AsyncThrowingStream<AudioChunk, any Error>.makeStream()
-        self.chunkContinuation = chunkContinuation
-
-        // セッション識別子はここで発行し、engine（セグメント転写）と store（保存先）へ配る。
+        // セッション識別子はここで発行し、全フィードの engine と store へ配る。
         // locale は候補の先頭。実際に話されていた言語はエンジンが判定してセグメントへ入れる
-        let context = TranscriptionContext(
+        let baseContext = TranscriptionContext(
             locale: primary.identifier(.bcp47),
-            source: source,
+            source: feeds[0].kind, // 保存先は1つなので meta の source は先頭フィードを代表にする
             sessionID: makeSessionID(),
             sessionStartedAt: now()
         )
-        currentContext = context
 
         do {
-            try await store.begin(context: context)
+            try await store.begin(context: baseContext)
         } catch {
             setState(.failed(error.localizedDescription))
             return
         }
 
-        let engineEvents: AsyncThrowingStream<TranscriptEvent, any Error>
-        do {
-            engineEvents = try await engine.start(chunks: chunkStream, context: context)
-        } catch {
-            setState(.failed(error.localizedDescription))
-            return
-        }
-        startConsumer(engineEvents)
-
-        do {
-            try await startCaptureAndForward(format: format)
-        } catch {
-            setState(.failed(error.localizedDescription))
-            return
+        for (index, feed) in feeds.enumerated() {
+            var context = baseContext
+            context.source = feed.kind
+            do {
+                try await activate(feed: feed, index: index, format: formats[index], context: context)
+            } catch {
+                await tearDownActiveFeeds()
+                setState(.failed(error.localizedDescription))
+                return
+            }
         }
         setState(.recording)
     }
@@ -107,12 +123,23 @@ public actor RecordingSession {
     public func stop() async {
         guard state == .recording || state == .preparing else { return }
         setState(.stopping)
-        await capture.stop()
+        for slot in activeFeeds {
+            await slot.feed.capture.stop()
+        }
         // キャプチャストリームの正常終了（forwarding の完走）を待ってから閉じる
-        await forwardingTask?.value
-        chunkContinuation?.finish()
-        await engine.finish()
-        await consumerTask?.value
+        for slot in activeFeeds {
+            await slot.forwardingTask?.value
+        }
+        for slot in activeFeeds {
+            slot.chunkContinuation?.finish()
+        }
+        for slot in activeFeeds {
+            await slot.feed.engine.finish()
+        }
+        for slot in activeFeeds {
+            await slot.consumerTask?.value
+        }
+        activeFeeds.removeAll()
         // 全 append 完了後にセッションを閉じる。finalize 失敗は記録済みデータに影響しないため握る
         if let ref = try? await store.finalize(endedAt: now()) {
             eventContinuation.yield(.sessionFinished(ref))
@@ -122,11 +149,18 @@ public actor RecordingSession {
 
     // MARK: Private
 
-    private let capture: any AudioCaptureSource
-    private let engine: any TranscriptionEngine
+    /// 起動済みフィードの実行時状態。forwardingTask は再起動で差し替わる
+    private struct FeedSlot {
+        let feed: RecordingFeed
+        let format: AVAudioFormat
+        var chunkContinuation: AsyncThrowingStream<AudioChunk, any Error>.Continuation?
+        var forwardingTask: Task<Void, Never>?
+        var consumerTask: Task<Void, Never>?
+        var restartCount = 0
+    }
+
     private let store: any TranscriptStore
     private let translationTimeout: Duration
-    private let source: AudioSourceKind
     private let now: @Sendable () -> Date
     private let makeSessionID: @Sendable () -> UUID
     private nonisolated let eventContinuation: AsyncStream<SessionEvent>.Continuation
@@ -135,12 +169,7 @@ public actor RecordingSession {
     private var makeTranslator: (@Sendable (String) -> (any Translator)?)?
     /// ロケールごとの翻訳器。作れなかった場合も nil を覚えて作り直さない
     private var translatorCache: [String: (any Translator)?] = [:]
-    private var currentContext: TranscriptionContext?
-    private var analyzerFormat: AVAudioFormat?
-    private var chunkContinuation: AsyncThrowingStream<AudioChunk, any Error>.Continuation?
-    private var forwardingTask: Task<Void, Never>?
-    private var consumerTask: Task<Void, Never>?
-    private var captureRestartCount = 0
+    private var activeFeeds: [FeedSlot] = []
 
     private var canStart: Bool {
         switch state {
@@ -150,12 +179,12 @@ public actor RecordingSession {
     }
 
     private func cleanUpPreviousRun() {
-        chunkContinuation?.finish()
-        forwardingTask?.cancel()
-        consumerTask?.cancel()
-        forwardingTask = nil
-        consumerTask = nil
-        captureRestartCount = 0
+        for slot in activeFeeds {
+            slot.chunkContinuation?.finish()
+            slot.forwardingTask?.cancel()
+            slot.consumerTask?.cancel()
+        }
+        activeFeeds.removeAll()
     }
 
     private func setState(_ newState: SessionState) {
@@ -163,49 +192,82 @@ public actor RecordingSession {
         eventContinuation.yield(.stateChanged(newState))
     }
 
-    private func startCaptureAndForward(format: AVAudioFormat) async throws {
-        let stream = try await capture.start(targetFormat: format)
-        guard let chunkContinuation else { return }
-        forwardingTask = Task { [weak self] in
+    /// エンジン起動 → スロット登録 → キャプチャ起動。スロットは capture.start の失敗時にも
+    /// 積まれた状態で残し、呼び出し側の tearDownActiveFeeds で畳ませる
+    private func activate(
+        feed: RecordingFeed, index: Int, format: AVAudioFormat, context: TranscriptionContext
+    ) async throws {
+        let (chunkStream, chunkContinuation) = AsyncThrowingStream<AudioChunk, any Error>.makeStream()
+        let engineEvents = try await feed.engine.start(chunks: chunkStream, context: context)
+        var slot = FeedSlot(feed: feed, format: format, chunkContinuation: chunkContinuation)
+        slot.consumerTask = makeConsumerTask(engineEvents)
+        activeFeeds.append(slot)
+        try await startCaptureAndForward(at: index)
+    }
+
+    /// 起動途中の失敗や記録中の恒久障害で、動いているものをすべて畳む。
+    /// 片方の音源だけで録り続けると「揃った記録」に見えてしまうため、部分継続はしない
+    private func tearDownActiveFeeds() async {
+        for slot in activeFeeds {
+            await slot.feed.capture.stop()
+            slot.chunkContinuation?.finish()
+            slot.forwardingTask?.cancel()
+            slot.consumerTask?.cancel()
+        }
+        activeFeeds.removeAll()
+    }
+
+    private func startCaptureAndForward(at index: Int) async throws {
+        let slot = activeFeeds[index]
+        let stream = try await slot.feed.capture.start(targetFormat: slot.format)
+        guard let chunkContinuation = slot.chunkContinuation else { return }
+        activeFeeds[index].forwardingTask = Task { [weak self] in
             do {
                 for try await chunk in stream {
                     chunkContinuation.yield(chunk)
                 }
-                await self?.captureStreamEnded()
+                await self?.captureStreamEnded(at: index)
             } catch {
-                await self?.captureStreamFailed(error)
+                await self?.captureStreamFailed(at: index, error)
             }
         }
     }
 
-    private func captureStreamEnded() async {
+    private func captureStreamEnded(at index: Int) async {
         // stop() 経由の正常終了は .stopping で来る。録音中の無通告終了は障害として扱う
         if state == .recording {
-            await attemptCaptureRestart(reason: "capture stream ended unexpectedly")
+            await attemptCaptureRestart(at: index, reason: "capture stream ended unexpectedly")
         }
     }
 
-    private func captureStreamFailed(_ error: any Error) async {
+    private func captureStreamFailed(at index: Int, _ error: any Error) async {
         guard state == .recording else { return }
-        await attemptCaptureRestart(reason: error.localizedDescription)
+        await attemptCaptureRestart(at: index, reason: error.localizedDescription)
     }
 
-    /// スリープ復帰などの一過性障害を想定して1回だけ再起動する。2回目は failed
-    private func attemptCaptureRestart(reason: String) async {
-        guard captureRestartCount == 0, let analyzerFormat else {
-            setState(.failed(reason))
+    /// スリープ復帰などの一過性障害を想定して、そのフィードだけを1回再起動する。2回目は failed
+    private func attemptCaptureRestart(at index: Int, reason: String) async {
+        guard index < activeFeeds.count, activeFeeds[index].restartCount == 0 else {
+            await failSession(reason)
             return
         }
-        captureRestartCount += 1
+        activeFeeds[index].restartCount += 1
         do {
-            try await startCaptureAndForward(format: analyzerFormat)
+            try await startCaptureAndForward(at: index)
         } catch {
-            setState(.failed(error.localizedDescription))
+            await failSession(error.localizedDescription)
         }
     }
 
-    private func startConsumer(_ engineEvents: AsyncThrowingStream<TranscriptEvent, any Error>) {
-        consumerTask = Task { [weak self] in
+    private func failSession(_ reason: String) async {
+        await tearDownActiveFeeds()
+        setState(.failed(reason))
+    }
+
+    private func makeConsumerTask(
+        _ engineEvents: AsyncThrowingStream<TranscriptEvent, any Error>
+    ) -> Task<Void, Never> {
+        Task { [weak self] in
             do {
                 for try await event in engineEvents {
                     await self?.handle(event)
@@ -258,9 +320,9 @@ public actor RecordingSession {
         return created
     }
 
-    private func engineFailed(_ error: any Error) {
+    private func engineFailed(_ error: any Error) async {
         if state == .recording {
-            setState(.failed(error.localizedDescription))
+            await failSession(error.localizedDescription)
         }
     }
 }

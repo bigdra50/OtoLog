@@ -181,27 +181,6 @@ public final class ProcessTapCaptureSource: AudioCaptureSource, @unchecked Senda
         return format
     }
 
-    /// サンプル型（Float32/Int16）に依存しないよう audioBufferList を丸ごと複製する
-    private static func ownedCopy(of buffer: AVAudioPCMBuffer) -> AVAudioPCMBuffer? {
-        guard let copy = AVAudioPCMBuffer(pcmFormat: buffer.format, frameCapacity: buffer.frameLength) else {
-            return nil
-        }
-        copy.frameLength = buffer.frameLength
-        let sourceBuffers = UnsafeMutableAudioBufferListPointer(
-            UnsafeMutablePointer(mutating: buffer.audioBufferList)
-        )
-        let destinationBuffers = UnsafeMutableAudioBufferListPointer(copy.mutableAudioBufferList)
-        guard sourceBuffers.count == destinationBuffers.count else { return nil }
-        for index in 0..<sourceBuffers.count {
-            guard let source = sourceBuffers[index].mData,
-                  let destination = destinationBuffers[index].mData else { return nil }
-            let bytes = min(sourceBuffers[index].mDataByteSize, destinationBuffers[index].mDataByteSize)
-            memcpy(destination, source, Int(bytes))
-            destinationBuffers[index].mDataByteSize = bytes
-        }
-        return copy
-    }
-
     private func isDeviceAlive() -> Bool {
         var address = Self.aliveAddress
         var alive: UInt32 = 0
@@ -223,9 +202,7 @@ public final class ProcessTapCaptureSource: AudioCaptureSource, @unchecked Senda
             bufferListNoCopy: bufferList
         ), sourceBuffer.frameLength > 0 else { return }
 
-        guard let converted = converter.convert(sourceBuffer, to: targetFormat) else { return }
-        let owned = (converted === sourceBuffer) ? Self.ownedCopy(of: converted) : converted
-        if let owned {
+        if let owned = converter.convertOwned(sourceBuffer, to: targetFormat) {
             continuation?.yield(AudioChunk(buffer: owned))
         }
     }
@@ -235,6 +212,7 @@ public final class ProcessTapCaptureSource: AudioCaptureSource, @unchecked Senda
 
 public enum CaptureError: Error, LocalizedError {
     case systemAudioRecordingPermissionDenied
+    case microphonePermissionDenied
     case captureSetupFailed(status: OSStatus)
     case captureDeviceInvalidated
 
@@ -244,6 +222,8 @@ public enum CaptureError: Error, LocalizedError {
         switch self {
         case .systemAudioRecordingPermissionDenied:
             "システム音声の録音の許可が必要です。システム設定 > プライバシーとセキュリティ > 画面収録とシステム音声録音 で OtoLog を許可し、アプリを再起動してください。"
+        case .microphonePermissionDenied:
+            "マイクの使用許可が必要です。システム設定 > プライバシーとセキュリティ > マイク で OtoLog を許可してください。"
         case let .captureSetupFailed(status):
             "音声キャプチャの初期化に失敗しました（OSStatus \(status)）"
         case .captureDeviceInvalidated:

@@ -49,4 +49,26 @@ struct BufferConverterTests {
 
         #expect(output === input)
     }
+
+    /// タップコールバック所有のバッファを yield 後も安全に使うための所有コピー保証。
+    /// フォーマット一致の素通しでも入力と同じインスタンスは返さない
+    @Test func convertOwnedReturnsCallerOwnedCopyWhenFormatsMatch() {
+        let converter = BufferConverter()
+        let input = TestSignal.sine(format: target16k1ch, seconds: 0.1)
+
+        let output = converter.convertOwned(input, to: target16k1ch)
+
+        #expect(output !== input)
+        #expect(output?.frameLength == input.frameLength)
+        #expect(output?.format == target16k1ch)
+    }
+
+    @Test func convertOwnedStillConvertsAcrossFormats() {
+        let converter = BufferConverter()
+
+        let output = converter.convertOwned(TestSignal.sine(format: source48k2ch, seconds: 0.1), to: target16k1ch)
+
+        #expect(output?.format == target16k1ch)
+        #expect((output?.frameLength ?? 0) > 0)
+    }
 }

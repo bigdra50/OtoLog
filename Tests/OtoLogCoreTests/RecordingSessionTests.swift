@@ -1,3 +1,4 @@
+@preconcurrency import AVFAudio
 import Foundation
 @testable import OtoLogCore
 import Testing
@@ -11,7 +12,7 @@ struct RecordingSessionTests {
         let sut = makeSUT()
         sut.engine.progressScript = [0.5]
 
-        await sut.session.start(locales: [ja])
+        await sut.session.start(feeds: sut.feeds, locales: [ja])
 
         #expect(await eventually { sut.collector.events.contains(.stateChanged(.recording)) })
         #expect(Array(sut.collector.events.prefix(3)) == [
@@ -29,7 +30,7 @@ struct RecordingSessionTests {
         let startedAt = Date(timeIntervalSince1970: 1_785_297_600)
         let sut = makeSUT(now: { startedAt }, makeSessionID: { id })
 
-        await sut.session.start(locales: [ja])
+        await sut.session.start(feeds: sut.feeds, locales: [ja])
 
         _ = await eventually { await sut.session.state == .recording }
         let context = sut.engine.receivedContexts.first
@@ -102,7 +103,7 @@ struct RecordingSessionTests {
     @Test func secondStartWhileRecordingIsNoOp() async {
         let sut = await makeStartedSUT()
 
-        await sut.session.start(locales: [ja])
+        await sut.session.start(feeds: sut.feeds, locales: [ja])
 
         #expect(sut.engine.prepareCallCount == 1)
     }
@@ -120,7 +121,7 @@ struct RecordingSessionTests {
         let sut = makeSUT()
         sut.engine.prepareError = Boom()
 
-        await sut.session.start(locales: [ja])
+        await sut.session.start(feeds: sut.feeds, locales: [ja])
 
         let state = await sut.session.state
         guard case .failed = state else {
@@ -170,6 +171,130 @@ struct RecordingSessionTests {
         let recovered = TestFixtures.segment(text: "復帰後")
         sut.engine.send(.finalized(recovered))
         #expect(await eventually { await sut.store.segments == [recovered] })
+    }
+
+    // MARK: 複数入力（システム音声 + マイク）
+
+    /// フィードごとにキャプチャとエンジンを対で起動する
+    @Test func startWithTwoFeedsStartsBothPairs() async {
+        let sut = makeSUT(kinds: [.system, .microphone])
+
+        await sut.session.start(feeds: sut.feeds, locales: [ja])
+
+        #expect(await eventually { await sut.session.state == .recording })
+        for feed in sut.feedDoubles {
+            #expect(feed.engine.prepareCallCount == 1)
+            #expect(feed.capture.startCallCount == 1)
+        }
+    }
+
+    /// セグメントの話者区別の根拠になる source は、フィードの種別ごとに context へ入る。
+    /// セッション識別子は全フィードで共有される（同じ記録の別音源）
+    @Test func contextSourceMatchesFeedKind() async throws {
+        let id = try #require(UUID(uuidString: "00000000-0000-0000-0000-00000000000B"))
+        let sut = makeSUT(kinds: [.system, .microphone], makeSessionID: { id })
+
+        await sut.session.start(feeds: sut.feeds, locales: [ja])
+
+        _ = await eventually { await sut.session.state == .recording }
+        #expect(sut.feedDoubles[0].engine.receivedContexts.first?.source == .system)
+        #expect(sut.feedDoubles[1].engine.receivedContexts.first?.source == .microphone)
+        #expect(sut.feedDoubles[1].engine.receivedContexts.first?.sessionID == id)
+    }
+
+    /// 保存先の確保はセッションに1回。meta の source は先頭フィードを代表にする
+    @Test func beginIsCalledOncePerSession() async {
+        let sut = makeSUT(kinds: [.system, .microphone])
+
+        await sut.session.start(feeds: sut.feeds, locales: [ja])
+
+        _ = await eventually { await sut.session.state == .recording }
+        #expect(await sut.store.beganContexts.count == 1)
+        #expect(await sut.store.beganContexts.first?.source == .system)
+    }
+
+    @Test func microphoneOnlyFeedBeginsStoreWithMicrophoneSource() async {
+        let sut = makeSUT(kinds: [.microphone])
+
+        await sut.session.start(feeds: sut.feeds, locales: [ja])
+
+        _ = await eventually { await sut.session.state == .recording }
+        #expect(await sut.store.beganContexts.first?.source == .microphone)
+    }
+
+    /// 両方の音源の確定セグメントが同じストアへ集まる（時系列マージは読み手側の責務）
+    @Test func segmentsFromAllFeedsAreStored() async {
+        let sut = await makeStartedSUT(kinds: [.system, .microphone])
+        let fromSystem = TestFixtures.segment(text: "相手の発言", source: .system)
+        let fromMicrophone = TestFixtures.segment(text: "自分の発言", source: .microphone)
+
+        sut.feedDoubles[0].engine.send(.finalized(fromSystem))
+        sut.feedDoubles[1].engine.send(.finalized(fromMicrophone))
+
+        #expect(await eventually { await sut.store.segments.count == 2 })
+        #expect(await sut.store.segments.contains(fromSystem))
+        #expect(await sut.store.segments.contains(fromMicrophone))
+    }
+
+    /// キャプチャはエンジンごとに用意されたフォーマットで始める（フィード間で共有しない）
+    @Test func eachCaptureReceivesItsOwnEngineFormat() async throws {
+        let sut = makeSUT(kinds: [.system, .microphone])
+        sut.feedDoubles[1].engine.prepareFormat = try #require(AVAudioFormat(
+            standardFormatWithSampleRate: 24000, channels: 1
+        ))
+
+        await sut.session.start(feeds: sut.feeds, locales: [ja])
+
+        _ = await eventually { await sut.session.state == .recording }
+        #expect(sut.feedDoubles[0].capture.receivedTargetFormats.first?.sampleRate == 16000)
+        #expect(sut.feedDoubles[1].capture.receivedTargetFormats.first?.sampleRate == 24000)
+    }
+
+    /// 停止は全キャプチャ → 全エンジン → ストア確定の順。確定は1回だけ
+    @Test func stopStopsAllFeedsBeforeFinalizingOnce() async {
+        let sut = await makeStartedSUT(kinds: [.system, .microphone])
+        let order = OrderLog()
+        sut.feedDoubles[0].capture.onStop = { order.append("capture.stop[system]") }
+        sut.feedDoubles[1].capture.onStop = { order.append("capture.stop[mic]") }
+        sut.feedDoubles[0].engine.onFinish = { order.append("engine.finish[system]") }
+        sut.feedDoubles[1].engine.onFinish = { order.append("engine.finish[mic]") }
+        await sut.store.setOnFinalize { order.append("store.finalize") }
+
+        await sut.session.stop()
+
+        #expect(order.entries == [
+            "capture.stop[system]",
+            "capture.stop[mic]",
+            "engine.finish[system]",
+            "engine.finish[mic]",
+            "store.finalize",
+        ])
+        #expect(await sut.store.finalizedAts.count == 1)
+    }
+
+    /// 片方の音源の一過性障害では、そのフィードだけを再起動して記録を続ける
+    @Test func oneFeedFailureRestartsOnlyThatFeed() async {
+        let sut = await makeStartedSUT(kinds: [.system, .microphone])
+
+        sut.feedDoubles[1].capture.fail(Boom())
+
+        #expect(await eventually { sut.feedDoubles[1].capture.startCallCount == 2 })
+        #expect(sut.feedDoubles[0].capture.startCallCount == 1)
+        #expect(await sut.session.state == .recording)
+    }
+
+    /// 起動途中の失敗はセッション全体を failed にし、起動済みのキャプチャを畳む
+    @Test func startFailureOnAnyFeedFailsSessionAndStopsStartedCaptures() async {
+        let sut = makeSUT(kinds: [.system, .microphone])
+        sut.feedDoubles[1].capture.errorOnStart = Boom()
+
+        await sut.session.start(feeds: sut.feeds, locales: [ja])
+
+        #expect(await eventually {
+            if case .failed = await sut.session.state { return true }
+            return false
+        })
+        #expect(await eventually { sut.feedDoubles[0].capture.stopCallCount == 1 })
     }
 
     // MARK: 翻訳
@@ -234,12 +359,30 @@ struct RecordingSessionTests {
 
     // MARK: Private
 
-    private struct SUT {
-        let session: RecordingSession
+    private struct FeedDoubles {
         let capture: FakeCaptureSource
         let engine: FakeTranscriptionEngine
+        let kind: AudioSourceKind
+    }
+
+    private struct SUT {
+        let session: RecordingSession
+        let feedDoubles: [FeedDoubles]
         let store: SpyStore
         let collector: EventCollector
+
+        /// 単一フィードのテスト向けショートカット
+        var capture: FakeCaptureSource {
+            feedDoubles[0].capture
+        }
+
+        var engine: FakeTranscriptionEngine {
+            feedDoubles[0].engine
+        }
+
+        var feeds: [RecordingFeed] {
+            feedDoubles.map { RecordingFeed(capture: $0.capture, engine: $0.engine, kind: $0.kind) }
+        }
     }
 
     private var ja: Locale {
@@ -247,35 +390,38 @@ struct RecordingSessionTests {
     }
 
     private func makeSUT(
+        kinds: [AudioSourceKind] = [.system],
         now: @escaping @Sendable () -> Date = { Date() },
         makeSessionID: @escaping @Sendable () -> UUID = { UUID() },
         translationTimeout: Duration = .seconds(10)
     ) -> SUT {
-        let capture = FakeCaptureSource()
-        let engine = FakeTranscriptionEngine()
+        let feedDoubles = kinds.map {
+            FeedDoubles(capture: FakeCaptureSource(), engine: FakeTranscriptionEngine(), kind: $0)
+        }
         let store = SpyStore()
         let session = RecordingSession(
-            capture: capture, engine: engine, store: store,
+            store: store,
             translationTimeout: translationTimeout,
             now: now, makeSessionID: makeSessionID
         )
         let collector = EventCollector()
         collector.attach(to: session.events)
-        return SUT(session: session, capture: capture, engine: engine, store: store, collector: collector)
+        return SUT(session: session, feedDoubles: feedDoubles, store: store, collector: collector)
     }
 
     private func makeStartedSUT(
+        kinds: [AudioSourceKind] = [.system],
         now: @escaping @Sendable () -> Date = { Date() },
         translator: (any Translator)? = nil,
         translationTimeout: Duration = .seconds(10)
     ) async -> SUT {
-        let sut = makeSUT(now: now, translationTimeout: translationTimeout)
+        let sut = makeSUT(kinds: kinds, now: now, translationTimeout: translationTimeout)
         // 翻訳器はロケールごとに引かれる。テストではどのロケールでも同じものを返す
         var factory: (@Sendable (String) -> (any Translator)?)?
         if let translator {
             factory = { _ in translator }
         }
-        await sut.session.start(locales: [ja], makeTranslator: factory)
+        await sut.session.start(feeds: sut.feeds, locales: [ja], makeTranslator: factory)
         _ = await eventually { await sut.session.state == .recording }
         return sut
     }

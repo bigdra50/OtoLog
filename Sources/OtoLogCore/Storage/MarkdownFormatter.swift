@@ -16,10 +16,13 @@ public struct MarkdownFormatter: Sendable {
     }
 
     /// 1セグメント1行を守るため改行と連続空白は空白1個に潰す。空になったら nil（書かない）。
-    /// 訳があるときは原文の子行として続ける（原文を正本に残したまま訳を読めるようにする）
+    /// 訳があるときは原文の子行として続ける（原文を正本に残したまま訳を読めるようにする）。
+    /// マイク由来（話者本人）は「自分:」で区別し、システム音声側は従来表記のまま
+    /// （会議以外の記録を話者ラベルで汚さない）
     public func line(for segment: TranscriptSegment) -> String? {
         guard let squashed = Self.squash(segment.text) else { return nil }
-        var line = "- **\(timeString(from: segment.finalizedAt))** \(squashed)\n"
+        let speaker = segment.source == .microphone ? "自分: " : ""
+        var line = "- **\(timeString(from: segment.finalizedAt))** \(speaker)\(squashed)\n"
         if let translation = segment.translation.flatMap(Self.squash) {
             line += "  - \(translation)\n"
         }

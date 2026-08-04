@@ -20,6 +20,29 @@ enum PostStopAction: String, CaseIterable {
     }
 }
 
+// MARK: - AudioInputMode
+
+/// 記録する音源の組み合わせ。
+enum AudioInputMode: String, CaseIterable {
+    case system
+    case systemAndMicrophone
+    case microphoneOnly
+
+    // MARK: Internal
+
+    var displayName: String {
+        switch self {
+        case .system: "システム音声のみ"
+        case .systemAndMicrophone: "システム音声 + マイク"
+        case .microphoneOnly: "マイクのみ"
+        }
+    }
+
+    var usesMicrophone: Bool {
+        self != .system
+    }
+}
+
 // MARK: - UserDefaults + nonEmptyString
 
 private extension UserDefaults {
@@ -54,6 +77,9 @@ private extension UserDefaults {
         subtitleOverlayEnabled = defaults.object(forKey: Self.subtitleOverlayKey) as? Bool ?? true
         recognitionCandidates = defaults.stringArray(forKey: Self.recognitionCandidatesKey)
             ?? Self.defaultRecognitionCandidates
+        audioInputMode = defaults.nonEmptyString(forKey: Self.audioInputModeKey)
+            .flatMap(AudioInputMode.init(rawValue:)) ?? .system
+        microphoneDeviceUID = defaults.nonEmptyString(forKey: Self.microphoneDeviceUIDKey)
     }
 
     // MARK: Internal
@@ -114,6 +140,16 @@ private extension UserDefaults {
         didSet { defaults.set(recognitionCandidates, forKey: Self.recognitionCandidatesKey) }
     }
 
+    /// 記録する音源の組み合わせ。次の記録開始から反映される
+    var audioInputMode: AudioInputMode {
+        didSet { defaults.set(audioInputMode.rawValue, forKey: Self.audioInputModeKey) }
+    }
+
+    /// 使用するマイクの UID。nil はシステム既定の入力デバイス
+    var microphoneDeviceUID: String? {
+        didSet { defaults.set(microphoneDeviceUID, forKey: Self.microphoneDeviceUIDKey) }
+    }
+
     /// 実際に認識へ渡す候補。先頭は判定できなかったときの落としどころになる
     var resolvedRecognitionLocales: [String] {
         guard localeIdentifier == Self.autoRecognitionLocale else { return [localeIdentifier] }
@@ -149,6 +185,8 @@ private extension UserDefaults {
     private static let translationTargetKey = "translationTargetIdentifier"
     private static let subtitleOverlayKey = "subtitleOverlayEnabled"
     private static let recognitionCandidatesKey = "recognitionCandidates"
+    private static let audioInputModeKey = "audioInputMode"
+    private static let microphoneDeviceUIDKey = "microphoneDeviceUID"
 
     private let defaults: UserDefaults
 }

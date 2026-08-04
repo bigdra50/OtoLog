@@ -43,6 +43,37 @@ public final class BufferConverter: @unchecked Sendable {
         return output
     }
 
+    /// convert と同じだが、返すバッファは常に呼び出し側が所有する。
+    /// フォーマット一致の素通しではコールバック所有のバッファがそのまま返るため、
+    /// yield 後にコールバック側で再利用されても安全なよう複製してから返す
+    public func convertOwned(_ buffer: AVAudioPCMBuffer, to targetFormat: AVAudioFormat) -> AVAudioPCMBuffer? {
+        guard let converted = convert(buffer, to: targetFormat) else { return nil }
+        return converted === buffer ? Self.ownedCopy(of: converted) : converted
+    }
+
+    // MARK: Internal
+
+    /// サンプル型（Float32/Int16）に依存しないよう audioBufferList を丸ごと複製する
+    static func ownedCopy(of buffer: AVAudioPCMBuffer) -> AVAudioPCMBuffer? {
+        guard let copy = AVAudioPCMBuffer(pcmFormat: buffer.format, frameCapacity: buffer.frameLength) else {
+            return nil
+        }
+        copy.frameLength = buffer.frameLength
+        let sourceBuffers = UnsafeMutableAudioBufferListPointer(
+            UnsafeMutablePointer(mutating: buffer.audioBufferList)
+        )
+        let destinationBuffers = UnsafeMutableAudioBufferListPointer(copy.mutableAudioBufferList)
+        guard sourceBuffers.count == destinationBuffers.count else { return nil }
+        for index in 0..<sourceBuffers.count {
+            guard let source = sourceBuffers[index].mData,
+                  let destination = destinationBuffers[index].mData else { return nil }
+            let bytes = min(sourceBuffers[index].mDataByteSize, destinationBuffers[index].mDataByteSize)
+            memcpy(destination, source, Int(bytes))
+            destinationBuffers[index].mDataByteSize = bytes
+        }
+        return copy
+    }
+
     // MARK: Private
 
     private var converter: AVAudioConverter?

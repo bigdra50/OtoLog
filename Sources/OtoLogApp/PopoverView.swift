@@ -96,6 +96,7 @@ struct PopoverView: View {
     private var stack: some View {
         VStack(alignment: .leading, spacing: 12) {
             header
+            AudioInputSelector(settings: settings, isRecording: state.isRecording)
             content
             Divider()
             footer

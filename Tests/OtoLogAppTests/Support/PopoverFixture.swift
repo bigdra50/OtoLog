@@ -4,35 +4,6 @@ import Foundation
 import OtoLogCore
 import SwiftUI
 
-// MARK: - IdleCaptureSource
-
-/// レイアウト検証用。音声には触らせない。
-/// 呼ばれたら失敗させて、測定のはずが録音を始めていた事故を検知する
-struct IdleCaptureSource: AudioCaptureSource {
-    func start(targetFormat _: AVAudioFormat) async throws -> AsyncThrowingStream<AudioChunk, any Error> {
-        throw LayoutFixtureMisuse.audioTouched
-    }
-
-    func stop() async {}
-}
-
-// MARK: - IdleTranscriptionEngine
-
-struct IdleTranscriptionEngine: TranscriptionEngine {
-    func prepare(locales _: [Locale], onProgress _: @escaping @Sendable (Double) -> Void) async throws -> AVAudioFormat {
-        throw LayoutFixtureMisuse.audioTouched
-    }
-
-    func start(
-        chunks _: AsyncThrowingStream<AudioChunk, any Error>,
-        context _: TranscriptionContext
-    ) async throws -> AsyncThrowingStream<TranscriptEvent, any Error> {
-        throw LayoutFixtureMisuse.audioTouched
-    }
-
-    func finish() async {}
-}
-
 // MARK: - IdleTranscriptStore
 
 struct IdleTranscriptStore: TranscriptStore {
@@ -52,7 +23,6 @@ struct IdleTranscriptStore: TranscriptStore {
 // MARK: - LayoutFixtureMisuse
 
 enum LayoutFixtureMisuse: Error {
-    case audioTouched
     case storeTouched
 }
 
@@ -70,11 +40,8 @@ enum LayoutFixtureMisuse: Error {
         settings.postStopAction = .titleAndPipeline
 
         state = AppState()
-        let session = RecordingSession(
-            capture: IdleCaptureSource(),
-            engine: IdleTranscriptionEngine(),
-            store: IdleTranscriptStore()
-        )
+        // レイアウト測定では start を呼ばないため、store が触られた時点で誤用として失敗させる
+        let session = RecordingSession(store: IdleTranscriptStore())
         let store = SessionFileStore(
             directory: URL(fileURLWithPath: NSTemporaryDirectory()).appending(path: "otolog-layout-probe"),
             timeZone: TimeZone(identifier: "Asia/Tokyo") ?? .current
