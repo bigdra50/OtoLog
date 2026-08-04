@@ -33,9 +33,13 @@ public struct PromptBuilder: Sendable {
         template: GenerationTemplate,
         session: SessionRef,
         segments: [TranscriptSegment],
-        corrections: [CorrectionEntry] = []
+        corrections: [CorrectionEntry] = [],
+        knowledge: [KnowledgeEntry] = []
     ) -> String {
-        prompt(template: template, session: session, logBody: logBody(from: segments), corrections: corrections)
+        prompt(
+            template: template, session: session, logBody: logBody(from: segments),
+            corrections: corrections, knowledge: knowledge
+        )
     }
 
     /// パイプライン用: ログ本文（校正済みテキスト等）を直接渡し、依存タスクの結果を添付できる
@@ -44,22 +48,34 @@ public struct PromptBuilder: Sendable {
         session: SessionRef,
         logBody: String,
         dependencyOutputs: [DependencyOutput] = [],
-        corrections: [CorrectionEntry] = []
+        corrections: [CorrectionEntry] = [],
+        knowledge: [KnowledgeEntry] = [],
+        situation: String = ""
     ) -> String {
         let dependencySection = dependencyOutputs.isEmpty ? "" : "\n## 依存タスクの結果\n" + dependencyOutputs
             .map { "\n### \($0.displayName)\n\($0.body)\n" }
             .joined()
         let correctionSection = corrections.isEmpty ? "" : "\n## 既知の修正辞書（過去の補正で確定した表記。該当があれば従う）\n"
             + corrections.map { "- \($0.wrong) → \($0.right)" }.joined(separator: "\n") + "\n"
+        // 語を並べるだけでは何者か分からず、音が近いだけの箇所まで引き寄せる。
+        // 何であるかを添えて、文脈の合う箇所だけを直させる
+        // 現況は「今どうなっているか」。定義を教える前提知識とは別に、時点つきで渡す
+        let situationSection = situation.isEmpty ? "" : "\n## 現在の現況メモ（今回のログを踏まえて更新する対象）\n\(situation)\n"
+        let knowledgeSection = knowledge.isEmpty ? "" : "\n## 前提知識（この分野の固有名詞。表記はこれに従い、文脈が合う箇所だけ寄せる）\n"
+            + knowledge.map { "\n### \($0.term)\n\($0.body)\n" }.joined()
         return """
         あなたは音声文字起こしログの後処理を行うアシスタントです。以下のルールに厳密に従ってください。
         - 出力は結果の Markdown 本文のみ。前置き・後置き・説明文を書かず、出力全体をコードフェンスで囲まない
         - 出力の言語はログ本文と同じ言語にする
         - ログに存在しない事実を創作しない
+        - 強調（**太字**）で見出し代わりにしない。項目を立てたいときは見出しの階層で表す
+        - 図で示したほうが分かりやすい構造は ```mermaid のコードブロックで書く
+        - ツールが使えない・情報を確認できないなど実行上の問題が起きても、本文で謝罪や許可の要求をしない。\
+        得られた情報の範囲で生成指示に沿った成果物を完成させ、確認できなかった箇所は該当箇所への短い注記にとどめる
 
         ## 生成指示
         \(template.instructions)
-        \(correctionSection)
+        \(knowledgeSection)\(situationSection)\(correctionSection)
         ## 対象データ
         \(session.displayName)（\(startedAtDescription(session.startedAt)) 開始）のシステム音声文字起こしログ。
         1行が1確定セグメントで、行頭の [HH:mm:ss] はローカル時刻。

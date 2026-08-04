@@ -1,6 +1,8 @@
 import Foundation
 @testable import OtoLogCore
 
+// MARK: - FakeTextGenerator
+
 /// 受け取ったプロンプトを記録し、固定結果かエラーを返す TextGenerator。
 /// partials を設定するとストリーミング版でその断片が順に流れる。
 final class FakeTextGenerator: StreamingTextGenerator, @unchecked Sendable {
@@ -61,4 +63,22 @@ final class FakeTextGenerator: StreamingTextGenerator, @unchecked Sendable {
     private var _errorToThrow: (any Error)?
     private var _receivedPrompts: [String] = []
     private var _partials: [String] = []
+    private var _toolIssues: [ToolIssue] = []
+}
+
+// MARK: IssueReportingTextGenerator
+
+extension FakeTextGenerator: IssueReportingTextGenerator {
+    var toolIssues: [ToolIssue] {
+        get { lock.withLock { _toolIssues } }
+        set { lock.withLock { _toolIssues = newValue } }
+    }
+
+    func generateReporting(
+        prompt: String,
+        onPartial: @escaping @Sendable (String) -> Void
+    ) async throws -> ReportedGeneration {
+        let text = try await generate(prompt: prompt, onPartial: onPartial)
+        return ReportedGeneration(text: text, toolIssues: toolIssues)
+    }
 }

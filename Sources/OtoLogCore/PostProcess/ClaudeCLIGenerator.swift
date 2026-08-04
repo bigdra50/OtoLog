@@ -5,7 +5,7 @@ import Foundation
 /// claude -p をサブプロセスとして呼ぶ TextGenerator 実装。
 /// プロンプトは stdin で渡す（引数長制限 ARG_MAX の回避）。
 /// ストリーミング版は stream-json でデルタ（本文・thinking）を逐次観測できる。
-public struct ClaudeCLIGenerator: StreamingTextGenerator {
+public struct ClaudeCLIGenerator: IssueReportingTextGenerator {
     // MARK: Lifecycle
 
     public init(
@@ -116,6 +116,15 @@ public struct ClaudeCLIGenerator: StreamingTextGenerator {
         prompt: String,
         onPartial: @escaping @Sendable (String) -> Void
     ) async throws -> String {
+        try await generateReporting(prompt: prompt, onPartial: onPartial).text
+    }
+
+    /// ストリーミング + ツール実行の問題（権限拒否・失敗）の収集。
+    /// 生成が完走してもツールが使えていないケースを呼び出し側が警告にできる
+    public func generateReporting(
+        prompt: String,
+        onPartial: @escaping @Sendable (String) -> Void
+    ) async throws -> ReportedGeneration {
         guard FileManager.default.isExecutableFile(atPath: executableURL.path) else {
             throw ClaudeCLIGeneratorError.executableNotFound(path: executableURL.path)
         }
@@ -173,7 +182,7 @@ public struct ClaudeCLIGenerator: StreamingTextGenerator {
         guard !output.isEmpty else {
             throw ClaudeCLIGeneratorError.emptyOutput
         }
-        return output
+        return ReportedGeneration(text: output, toolIssues: parser.collectedToolIssues())
     }
 
     // MARK: Internal

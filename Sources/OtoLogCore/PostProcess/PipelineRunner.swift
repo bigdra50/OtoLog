@@ -26,6 +26,7 @@ public actor PipelineRunner {
         generatorFactory: @escaping @Sendable (PlaybookTask) -> any TextGenerator,
         templateStore: TemplateStore = TemplateStore(),
         correctionStore: CorrectionDictionaryStore? = CorrectionDictionaryStore(),
+        knowledgeStore: KnowledgeStore? = KnowledgeStore(),
         maxConcurrent: Int = 2,
         maxPromptCharacters: Int = 150_000,
         correctionChunkCharacters: Int = 12_000,
@@ -36,6 +37,7 @@ public actor PipelineRunner {
         self.generatorFactory = generatorFactory
         self.templateStore = templateStore
         self.correctionStore = correctionStore
+        self.knowledgeStore = knowledgeStore
         self.maxConcurrent = maxConcurrent
         self.maxPromptCharacters = maxPromptCharacters
         self.correctionChunkCharacters = correctionChunkCharacters
@@ -74,6 +76,8 @@ public actor PipelineRunner {
         let taskID: String
         let outputFile: String?
         let errorMessage: String?
+        /// 完走はしたが成果の質に影響した可能性がある問題（ツールの権限拒否等）
+        let warnings: [String]
         let wasCancelled: Bool
     }
 
@@ -96,6 +100,7 @@ public actor PipelineRunner {
     private let generatorFactory: @Sendable (PlaybookTask) -> any TextGenerator
     private let templateStore: TemplateStore
     private let correctionStore: CorrectionDictionaryStore?
+    private let knowledgeStore: KnowledgeStore?
     private let maxConcurrent: Int
     private let maxPromptCharacters: Int
 
@@ -112,17 +117,25 @@ public actor PipelineRunner {
     private var pendingIDs: [String] = []
     private var runningCount = 0
 
-    /// 単発生成。streaming 対応の generator なら生成中テキストを onProgress へ流す
+    /// 単発生成。streaming 対応の generator なら生成中テキストを onProgress へ流し、
+    /// 問題報告対応ならツール実行の問題も受け取る
     private nonisolated static func generate(
         prompt: String,
         with generator: any TextGenerator,
         onProgress: @escaping @Sendable (String) -> Void
-    ) async throws -> String {
+    ) async throws -> (text: String, issues: [ToolIssue]) {
+        if let reporting = generator as? IssueReportingTextGenerator {
+            let throttler = SnippetThrottler(onEmit: onProgress)
+            let reported = try await reporting.generateReporting(prompt: prompt) { throttler.append($0) }
+            return (reported.text, reported.toolIssues)
+        }
         if let streaming = generator as? StreamingTextGenerator {
             let throttler = SnippetThrottler(onEmit: onProgress)
-            return try await streaming.generate(prompt: prompt) { throttler.append($0) }
+            let text = try await streaming.generate(prompt: prompt) { throttler.append($0) }
+            return (text, [])
         }
-        return try await generator.generate(prompt: prompt)
+        let text = try await generator.generate(prompt: prompt)
+        return (text, [])
     }
 
     private func execute(
@@ -266,7 +279,9 @@ public actor PipelineRunner {
             setState(outcome.taskID, PipelineTaskState(status: .pending))
         } else if let outputFile = outcome.outputFile {
             setState(outcome.taskID, PipelineTaskState(
-                status: .done, outputFile: outputFile, startedAt: startedAt, finishedAt: now()
+                status: .done, outputFile: outputFile,
+                warnings: outcome.warnings.isEmpty ? nil : outcome.warnings,
+                startedAt: startedAt, finishedAt: now()
             ))
             if outcome.taskID == "correct" {
                 learnCorrections(outputFile: outputFile)
@@ -315,6 +330,7 @@ public actor PipelineRunner {
 
             // correct に依存し、その出力が使えるなら、ログ本文を校正結果に差し替える
             var logBody = builder.logBody(from: segments)
+            var readsCorrectedLog = false
             if task.dependsOn.contains("correct"),
                let correctState = states["correct"], correctState.status == .done,
                let file = correctState.outputFile,
@@ -322,6 +338,7 @@ public actor PipelineRunner {
                    contentsOf: sessionDirectory.appendingPathComponent(file), encoding: .utf8
                ) {
                 logBody = PostProcessRunner.stripProvenanceHeader(corrected)
+                readsCorrectedLog = true
             }
 
             var dependencyOutputs: [DependencyOutput] = []
@@ -342,38 +359,63 @@ public actor PipelineRunner {
             let corrections = task.templateID == "correct"
                 ? (correctionStore?.load().promptEntries() ?? [])
                 : []
+            // 前提知識は生ログを読むタスクにだけ渡す。校正済みログを受け取る下流では表記が既に直っており、
+            // 話題と無関係な用語まで積むとプロンプトが膨らんで本題の精度が落ちる
+            // （実測: 議事録のプロンプトが 25% 膨らみ、デバイス名が別製品へ化けた）
+            let knowledge = readsCorrectedLog ? [] : (knowledgeStore?.load() ?? [])
             let generator = generatorFactory(task)
             let generated: String
+            var warnings: [String] = []
             if task.templateID == "correct", logBody.count > correctionChunkCharacters {
+                // チャンク補正は書き写し系でツールを使わないため、問題収集の対象外
                 generated = try await chunkedCorrection(
                     logBody: logBody, template: template, session: session,
-                    corrections: corrections, builder: builder,
+                    corrections: corrections, knowledge: knowledge, builder: builder,
                     generator: generator, onProgress: onProgress
                 )
             } else {
                 let prompt = builder.prompt(
                     template: template, session: session, logBody: logBody,
-                    dependencyOutputs: dependencyOutputs, corrections: corrections
+                    dependencyOutputs: dependencyOutputs, corrections: corrections,
+                    knowledge: knowledge
                 )
                 guard prompt.count <= maxPromptCharacters else {
                     throw PostProcessError.promptTooLarge(characters: prompt.count, limit: maxPromptCharacters)
                 }
-                generated = try await Self.generate(prompt: prompt, with: generator, onProgress: onProgress)
+                let reported = try await Self.generate(prompt: prompt, with: generator, onProgress: onProgress)
+                generated = reported.text
+                warnings = reported.issues.map(\.userMessage)
             }
-            let body = PostProcessRunner.stripWrappingCodeFence(generated)
+            let output = GenerationOutput.files(
+                templateID: task.templateID,
+                generated: PostProcessRunner.stripWrappingCodeFence(generated)
+            )
+            let body = output.markdown
             let header = "<!-- otolog:generated template=\(task.templateID) source=transcript.jsonl "
                 + "generatedAt=\(PostProcessRunner.iso8601(now())) -->"
             let fileName = "\(task.templateID).md"
-            try (header + "\n\n" + body + "\n").write(
-                to: sessionDirectory.appendingPathComponent(fileName), atomically: true, encoding: .utf8
+            let fileURL = sessionDirectory.appendingPathComponent(fileName)
+            // 退避に失敗しても生成そのものは通す。履歴は保険であって成果ではない
+            try? GenerationHistory.archive(fileURL, now: now())
+            try (header + "\n\n" + body + "\n").write(to: fileURL, atomically: true, encoding: .utf8)
+            // 構造化出力は機械が読む正本として別に残す（md はここから組み立てた派生物）
+            if let json = output.json {
+                let jsonURL = sessionDirectory.appendingPathComponent("\(task.templateID).json")
+                try? GenerationHistory.archive(jsonURL, now: now())
+                try? json.write(to: jsonURL, atomically: true, encoding: .utf8)
+            }
+            return TaskOutcome(
+                taskID: task.id, outputFile: fileName, errorMessage: nil,
+                warnings: warnings, wasCancelled: false
             )
-            return TaskOutcome(taskID: task.id, outputFile: fileName, errorMessage: nil, wasCancelled: false)
         } catch is CancellationError {
-            return TaskOutcome(taskID: task.id, outputFile: nil, errorMessage: nil, wasCancelled: true)
+            return TaskOutcome(
+                taskID: task.id, outputFile: nil, errorMessage: nil, warnings: [], wasCancelled: true
+            )
         } catch {
             return TaskOutcome(
                 taskID: task.id, outputFile: nil,
-                errorMessage: error.localizedDescription, wasCancelled: false
+                errorMessage: error.localizedDescription, warnings: [], wasCancelled: false
             )
         }
     }
@@ -385,6 +427,7 @@ public actor PipelineRunner {
         template: GenerationTemplate,
         session: SessionRef,
         corrections: [CorrectionEntry],
+        knowledge: [KnowledgeEntry],
         builder: PromptBuilder,
         generator: any TextGenerator,
         onProgress: @escaping @Sendable (String) -> Void
@@ -399,13 +442,13 @@ public actor PipelineRunner {
                     let index = nextIndex
                     let prompt = builder.prompt(
                         template: template, session: session, logBody: chunks[index],
-                        corrections: corrections
+                        corrections: corrections, knowledge: knowledge
                     )
                     group.addTask {
-                        let text = try await Self.generate(
+                        let reported = try await Self.generate(
                             prompt: prompt, with: generator, onProgress: onProgress
                         )
-                        return (index, text)
+                        return (index, reported.text)
                     }
                     nextIndex += 1
                     running += 1

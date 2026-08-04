@@ -36,6 +36,19 @@ final class StreamEventParser: @unchecked Sendable {
         }
     }
 
+    /// 収集したツール実行の問題（発生順・同一ツール同種は1件）。
+    /// 権限拒否された呼び出しは is_error の tool_result としても流れてくるため、
+    /// 権限拒否があるツールの実行失敗は重ねて数えない
+    func collectedToolIssues() -> [ToolIssue] {
+        lock.withLock {
+            let deniedTools = Set(issues.filter { $0.kind == .permissionDenied }.map(\.toolName))
+            var seen = Set<String>()
+            return issues
+                .filter { $0.kind == .permissionDenied || !deniedTools.contains($0.toolName) }
+                .filter { seen.insert("\($0.toolName)/\($0.kind.rawValue)").inserted }
+        }
+    }
+
     // MARK: Private
 
     private let onPartial: @Sendable (String) -> Void
@@ -44,6 +57,9 @@ final class StreamEventParser: @unchecked Sendable {
     private var buffer = Data()
     private var accumulatedText = ""
     private var resultText: String?
+    private var issues: [ToolIssue] = []
+    /// tool_result（tool_use_id しか持たない）からツール名を引くための対応表
+    private var toolNamesByUseID: [String: String] = [:]
 
     private func parse(line: Data) {
         guard !line.isEmpty,
@@ -62,10 +78,30 @@ final class StreamEventParser: @unchecked Sendable {
                 // thinking は最終テキストには含めず、進捗表示にだけ流す
                 onPartial(thinking)
             }
+        case "assistant":
+            for block in contentBlocks(of: object) where block["type"] as? String == "tool_use" {
+                guard let id = block["id"] as? String, let name = block["name"] as? String else { continue }
+                toolNamesByUseID[id] = name
+            }
+        case "user":
+            for block in contentBlocks(of: object) where block["type"] as? String == "tool_result" {
+                guard block["is_error"] as? Bool == true else { continue }
+                let name = (block["tool_use_id"] as? String).flatMap { toolNamesByUseID[$0] } ?? "ツール"
+                issues.append(ToolIssue(toolName: name, kind: .executionFailed))
+            }
         case "result":
             resultText = object["result"] as? String
+            for denial in object["permission_denials"] as? [[String: Any]] ?? [] {
+                guard let name = denial["tool_name"] as? String else { continue }
+                issues.append(ToolIssue(toolName: name, kind: .permissionDenied))
+            }
         default:
             break
         }
+    }
+
+    private func contentBlocks(of object: [String: Any]) -> [[String: Any]] {
+        guard let message = object["message"] as? [String: Any] else { return [] }
+        return message["content"] as? [[String: Any]] ?? []
     }
 }

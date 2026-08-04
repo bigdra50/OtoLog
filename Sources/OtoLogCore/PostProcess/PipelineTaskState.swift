@@ -9,12 +9,14 @@ public struct PipelineTaskState: Sendable, Equatable, Codable {
         status: Status = .pending,
         outputFile: String? = nil,
         error: String? = nil,
+        warnings: [String]? = nil,
         startedAt: Date? = nil,
         finishedAt: Date? = nil
     ) {
         self.status = status
         self.outputFile = outputFile
         self.error = error
+        self.warnings = warnings
         self.startedAt = startedAt
         self.finishedAt = finishedAt
     }
@@ -33,6 +35,8 @@ public struct PipelineTaskState: Sendable, Equatable, Codable {
     public var status: Status
     public var outputFile: String?
     public var error: String?
+    /// done でも成果の質に影響した可能性がある問題（ツールの権限拒否等）。nil は問題なし
+    public var warnings: [String]?
     public var startedAt: Date?
     public var finishedAt: Date?
 }

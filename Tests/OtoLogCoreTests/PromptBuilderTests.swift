@@ -38,6 +38,7 @@ struct PromptBuilderTests {
         let corrections = [
             CorrectionEntry(
                 wrong: "家紋", right: "山", count: 3,
+                firstSeenAt: Date(timeIntervalSince1970: 1_785_297_600),
                 lastSeenAt: Date(timeIntervalSince1970: 1_785_297_600)
             ),
         ]
@@ -61,5 +62,35 @@ struct PromptBuilderTests {
             segments: [TestFixtures.segment(text: "1行目\n2行目")]
         )
         #expect(prompt.contains("[13:00:00] 1行目 2行目"))
+    }
+
+    /// 前提知識は用語と説明の対で渡す。
+    /// 語だけでは何者か分からず、音が近いだけの箇所まで引き寄せてしまう
+    @Test func injectsKnowledgeWithDescriptions() {
+        let prompt = PromptBuilder(timeZone: jst).prompt(
+            template: template, session: session, logBody: "本文",
+            knowledge: [KnowledgeEntry(term: "XREAL AURA", body: "XREAL 社の AR グラス。")]
+        )
+
+        #expect(prompt.contains("XREAL AURA"))
+        #expect(prompt.contains("XREAL 社の AR グラス。"))
+    }
+
+    @Test func omitsKnowledgeSectionWhenEmpty() {
+        let prompt = PromptBuilder(timeZone: jst).prompt(
+            template: template, session: session, logBody: "本文", knowledge: []
+        )
+
+        #expect(!prompt.contains("前提知識"))
+    }
+
+    /// ツールが使えなかった等の実行上の問題を、生成物本文の謝罪・権限要求で報告させない。
+    /// 「WebSearchの使用を許可していただけますでしょうか」が成果物として保存された実例への対策
+    @Test func forbidsApologyForRuntimeProblemsInOutput() {
+        let prompt = PromptBuilder(timeZone: jst).prompt(
+            template: template, session: session, logBody: "本文"
+        )
+
+        #expect(prompt.contains("謝罪や許可の要求をしない"))
     }
 }

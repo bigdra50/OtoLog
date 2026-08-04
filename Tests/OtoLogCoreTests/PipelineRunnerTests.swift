@@ -84,6 +84,57 @@ struct PipelineRunnerTests {
         }
     }
 
+    /// 前提知識は生ログを読むタスクにだけ渡す。
+    /// 校正済みログを受け取る下流では表記が既に直っており、積むとプロンプトが膨らむだけになる
+    @Test(.timeLimit(.minutes(1))) func knowledgeReachesOnlyTasksReadingRawLog() async throws {
+        try await withSessionDir { root, _ in
+            let knowledgeFile = root.appendingPathComponent("knowledge.md")
+            try "## XREAL AURA\nXREAL 社の Android XR デバイス。\n"
+                .write(to: knowledgeFile, atomically: true, encoding: .utf8)
+            let playbook = Playbook(id: "p", displayName: "p", tasks: [
+                PlaybookTask(templateID: "correct", model: .sonnet),
+                PlaybookTask(templateID: "summary", model: .sonnet, dependsOn: ["correct"]),
+                PlaybookTask(templateID: "qa", model: .haiku),
+            ])
+            let generators = [
+                "correct": FakeTextGenerator(result: "[13:00:00] 校正済み本文"),
+                "summary": FakeTextGenerator(result: "要約結果"),
+                "qa": FakeTextGenerator(result: "Q&A結果"),
+            ]
+            let runner = makeRunner(
+                root: root, generators: generators,
+                knowledgeStore: KnowledgeStore(fileURL: knowledgeFile)
+            )
+
+            for await _ in await runner.run(playbook: playbook, session: session) {}
+
+            #expect(generators["correct"]!.receivedPrompts.first!.contains("XREAL AURA"))
+            // qa は correct に依存しないので生ログを読む
+            #expect(generators["qa"]!.receivedPrompts.first!.contains("XREAL AURA"))
+            #expect(!generators["summary"]!.receivedPrompts.first!.contains("XREAL AURA"))
+        }
+    }
+
+    /// パイプラインの再実行でも、置き換えた前の版を履歴に残す
+    @Test(.timeLimit(.minutes(1))) func rerunKeepsPreviousVersionInHistory() async throws {
+        try await withSessionDir { root, sessionDir in
+            let playbook = Playbook(id: "p", displayName: "p", tasks: [
+                PlaybookTask(templateID: "summary", model: .sonnet),
+            ])
+            let generator = FakeTextGenerator(result: "1回目")
+            let runner = makeRunner(root: root, generators: ["summary": generator])
+
+            for await _ in await runner.run(playbook: playbook, session: session) {}
+            generator.result = "2回目"
+            for await _ in await runner.run(playbook: playbook, session: session) {}
+
+            let versions = GenerationHistory.versions(of: "summary.md", in: sessionDir)
+            #expect(versions.count == 1)
+            let previous = try versions.first.map { try String(contentsOf: $0, encoding: .utf8) }
+            #expect(previous?.contains("1回目") == true)
+        }
+    }
+
     /// 依存のない並列タスク4つでも同時実行は maxConcurrent に制限される
     @Test(.timeLimit(.minutes(1))) func respectsMaxConcurrentLimit() async throws {
         try await withSessionDir { root, _ in
@@ -224,9 +275,10 @@ struct PipelineRunnerTests {
             let playbook = Playbook(id: "p", displayName: "p", tasks: [
                 PlaybookTask(templateID: "correct", model: .sonnet),
             ])
-            // 原文「元の生ログ本文」→ 補正で「元の生ログ短文」（本 → 短 の置換）。
+            // 原文「元の生ログ本文」→ 補正で「元の生ログ抜粋」（本文 → 抜粋 の置換）。
+            // 置換元が1文字のペアは辞書化しないので、2文字ぶんが入れ替わる例にしてある。
             // 「本文→文章」のような共通文字を挟む変化は LCS が分割するためペアにならない（仕様）
-            let generators = ["correct": FakeTextGenerator(result: "[13:00:00] 元の生ログ短文")]
+            let generators = ["correct": FakeTextGenerator(result: "[13:00:00] 元の生ログ抜粋")]
             let dictionaryURL = root.appendingPathComponent("corrections.json")
             let runner = makeRunner(
                 root: root, generators: generators,
@@ -236,7 +288,7 @@ struct PipelineRunnerTests {
             for await _ in await runner.run(playbook: playbook, session: session) {}
 
             let dictionary = CorrectionDictionaryStore(fileURL: dictionaryURL).load()
-            #expect(dictionary.entries.contains { $0.wrong == "本" && $0.right == "短" })
+            #expect(dictionary.entries.contains { $0.wrong == "本文" && $0.right == "抜粋" })
         }
     }
 
@@ -321,7 +373,10 @@ struct PipelineRunnerTests {
             for index in 0..<6 {
                 #expect(promptsJoined.contains("セグメント\(index)の本文"))
             }
-            #expect(generator.receivedPrompts[0].contains("セグメント2の本文") == false)
+            // チャンクは2並列で走るため受信順は不定。順序ではなく「1プロンプト=1チャンク分」で見る
+            #expect(generator.receivedPrompts.allSatisfy { prompt in
+                (0..<6).count { prompt.contains("セグメント\($0)の本文") } == 2
+            })
             // 出力はチャンク数ぶん結合される
             let output = try String(contentsOf: sessionDir.appendingPathComponent("correct.md"), encoding: .utf8)
             let occurrences = output.components(separatedBy: "補正済みチャンク").count - 1
@@ -344,6 +399,34 @@ struct PipelineRunnerTests {
         }
     }
 
+    /// ツール実行の問題（権限拒否など）は警告としてタスク状態と meta.json に残る。
+    /// 生成物本文の謝罪文でしか異常が分からない状態にしないための記録側
+    @Test(.timeLimit(.minutes(1))) func recordsToolIssuesAsWarnings() async throws {
+        try await withSessionDir { root, sessionDir in
+            let playbook = Playbook(id: "p", displayName: "p", tasks: [
+                PlaybookTask(templateID: "references", model: .sonnet, allowsWebResearch: true),
+            ])
+            let generator = FakeTextGenerator(result: "リンク集")
+            generator.toolIssues = [ToolIssue(toolName: "WebSearch", kind: .permissionDenied)]
+            let runner = makeRunner(root: root, generators: ["references": generator])
+
+            var doneState: PipelineTaskState?
+            for await event in await runner.run(playbook: playbook, session: session) {
+                if case let .taskStateChanged(taskID, state) = event,
+                   taskID == "references", state.status == .done {
+                    doneState = state
+                }
+            }
+
+            let warning = ToolIssue(toolName: "WebSearch", kind: .permissionDenied).userMessage
+            #expect(doneState?.warnings == [warning])
+            let meta = try SessionMetaCoder.decode(
+                Data(contentsOf: sessionDir.appendingPathComponent("meta.json"))
+            )
+            #expect(meta.pipeline?["references"]?.warnings == [warning])
+        }
+    }
+
     // MARK: Private
 
     private func makeRunner(
@@ -351,6 +434,7 @@ struct PipelineRunnerTests {
         generators: [String: FakeTextGenerator],
         maxConcurrent: Int = 2,
         correctionStore: CorrectionDictionaryStore? = nil, // テストから実 config を汚さない
+        knowledgeStore: KnowledgeStore? = nil, // 同上。既定のままだと実 config の knowledge.md を読む
         correctionChunkCharacters: Int = 12_000
     ) -> PipelineRunner {
         PipelineRunner(
@@ -358,6 +442,7 @@ struct PipelineRunnerTests {
             timeZone: jst,
             generatorFactory: { task in generators[task.templateID] ?? FakeTextGenerator(result: "未定義") },
             correctionStore: correctionStore,
+            knowledgeStore: knowledgeStore,
             maxConcurrent: maxConcurrent,
             correctionChunkCharacters: correctionChunkCharacters,
             now: { Date(timeIntervalSince1970: 1_785_297_600) }
