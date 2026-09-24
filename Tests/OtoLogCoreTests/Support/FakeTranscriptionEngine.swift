@@ -16,7 +16,9 @@ final class FakeTranscriptionEngine: TranscriptionEngine, @unchecked Sendable {
     var onPrepare: (@Sendable () async -> Void)?
     var onStart: (@Sendable () async -> Void)?
     /// finish でイベント列を閉じる前に流すイベント。
-    /// 実エンジンが言語の判定待ちで持っていたセグメントを finish で吐き出すのを再現する
+    /// 実エンジンが言語の判定待ちで持っていたセグメントを finish で吐き出すのを再現する。
+    /// 取り消されたタスクで finish したときは流さない。実エンジンの吐き出し（SpeechAnalyzer の finalize）は
+    /// CancellationError で打ち切られ、残りの結果を出さずに終わる
     var eventsOnFinish: [TranscriptEvent] = []
 
     var prepareCallCount: Int {
@@ -77,8 +79,10 @@ final class FakeTranscriptionEngine: TranscriptionEngine, @unchecked Sendable {
     func finish() async {
         lock.withLock { _finishCallCount += 1 }
         onFinish?()
-        for event in eventsOnFinish {
-            currentEventContinuation?.yield(event)
+        if !Task.isCancelled {
+            for event in eventsOnFinish {
+                currentEventContinuation?.yield(event)
+            }
         }
         currentEventContinuation?.finish()
     }

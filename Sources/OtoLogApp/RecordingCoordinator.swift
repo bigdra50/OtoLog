@@ -239,6 +239,9 @@ import OtoLogCore
         switch event {
         case let .stateChanged(sessionState):
             state.sessionState = sessionState
+            if sessionState == .preparing {
+                state.autoStopNotice = nil
+            }
             if sessionState == .recording {
                 state.storeErrorMessage = nil
                 state.translationErrorMessage = nil
@@ -264,6 +267,8 @@ import OtoLogCore
             state.storeErrorMessage = message
         case let .translationError(message):
             state.translationErrorMessage = message
+        case let .autoStopped(silence):
+            state.autoStopNotice = AutoStopNotice.message(silence: silence, stoppedAt: Date())
         case .captureInterrupted:
             // ポップオーバーには出さない。再起動で続くなら記録に支障はなく、
             // 諦めたときは続く failed の状態遷移が音源名つきの理由を表示する

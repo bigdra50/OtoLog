@@ -72,6 +72,17 @@ struct RecordingLogTests {
             == RecordingLog.Entry(level: .error, message: "translation error: 訳せません"))
     }
 
+    /// 止めたのが利用者ではなく無音の見張りだったことと、何分の無音で止めたかを残す
+    @Test func 無音での自動停止は無音の長さを残す() {
+        #expect(RecordingLog.Entry(event: .autoStopped(silence: .seconds(30 * 60)))
+            == RecordingLog.Entry(level: .info, message: "auto-stopped: silence for 30m"))
+    }
+
+    @Test func 分で割り切れない無音の長さは秒で残す() {
+        #expect(RecordingLog.Entry(event: .autoStopped(silence: .seconds(90)))
+            == RecordingLog.Entry(level: .info, message: "auto-stopped: silence for 90s"))
+    }
+
     @Test func 完了したセッションはディレクトリ名を残す() {
         let ref = SessionRef(directoryName: "2026-09-16/1032", title: nil, startedAt: fixedDate)
         #expect(RecordingLog.Entry(event: .sessionFinished(ref))

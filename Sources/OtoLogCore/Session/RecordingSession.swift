@@ -38,6 +38,7 @@ public actor RecordingSession {
         store: any TranscriptStore,
         translationTimeout: Duration = .seconds(10),
         restartPolicy: CaptureRestartPolicy = .default,
+        silenceCheckInterval: Duration = .seconds(15),
         now: @escaping @Sendable () -> Date = { Date() },
         makeSessionID: @escaping @Sendable () -> UUID = { UUID() },
         sleep: @escaping @Sendable (Duration) async throws -> Void = { try await Task.sleep(for: $0) }
@@ -45,6 +46,7 @@ public actor RecordingSession {
         self.store = store
         self.translationTimeout = translationTimeout
         self.restartPolicy = restartPolicy
+        self.silenceCheckInterval = silenceCheckInterval
         self.now = now
         self.makeSessionID = makeSessionID
         self.sleep = sleep
@@ -71,10 +73,14 @@ public actor RecordingSession {
     /// makeTranslator はセグメントのロケールを受けて翻訳器を作る。自動検出では開始時点で
     /// 翻訳元が決まらないため、生成を確定セグメントまで遅らせる。
     /// nil を返したロケールは訳さない（翻訳先が認識言語と同じ場合など）
+    ///
+    /// silenceTimeout を渡すと、記録中にどの音源からも発話（文字か数字を含む途中経過か確定結果）が届かないまま
+    /// その長さが過ぎたところで、autoStopped を知らせて停止と同じ手順で閉じる。nil なら無音では止めない
     public func start(
         feeds: [RecordingFeed],
         locales: [Locale],
-        makeTranslator: (@Sendable (String) -> (any Translator)?)? = nil
+        makeTranslator: (@Sendable (String) -> (any Translator)?)? = nil,
+        silenceTimeout: Duration? = nil
     ) async {
         guard canStart, !feeds.isEmpty, let primary = locales.first else { return }
         let run = UUID()
@@ -144,6 +150,9 @@ public actor RecordingSession {
         }
         setState(.recording)
         restartCapturesInterruptedWhilePreparing()
+        if let silenceTimeout {
+            watchSilence(timeout: silenceTimeout, run: run)
+        }
     }
 
     public func stop() async {
@@ -178,6 +187,9 @@ public actor RecordingSession {
     private let store: any TranscriptStore
     private let translationTimeout: Duration
     private let restartPolicy: CaptureRestartPolicy
+    /// 無音が続いたかを確かめる間隔。止まるのは無音が silenceTimeout に達してから最大でこの長さだけ遅れる。
+    /// 分単位の silenceTimeout に対して十分短く、確かめるのは経過時間の比較だけなので負荷も無い
+    private let silenceCheckInterval: Duration
     private let now: @Sendable () -> Date
     private let makeSessionID: @Sendable () -> UUID
     private let sleep: @Sendable (Duration) async throws -> Void
@@ -194,6 +206,9 @@ public actor RecordingSession {
     private var runID = UUID()
     /// この記録の保存先の確保。閉じる側は確保の途中なら終わるのを待ち、確保できていたときだけ閉じる
     private var storeBegin: Task<Void, any Error>?
+    /// 無音の判定と、それを周期的に確かめる見張り。silenceTimeout を渡した記録の .recording の間だけある
+    private var silenceMonitor: SilenceMonitor?
+    private var silenceWatchdog: Task<Void, Never>?
 
     private var canStart: Bool {
         switch state {
@@ -258,6 +273,9 @@ public actor RecordingSession {
     /// 失敗の片付けは、再起動を諦めたフィードの中継タスクや、失敗したエンジンの結果を受けるタスクの上で走る。
     /// 自分が走っているタスクの完走は待てない（待つと戻らない）ため、中継は待たず、結果を受けるタスクは自分のものを除いて待つ。
     /// 中継を待たないぶん、止める直前にキャプチャから届いていたチャンクはエンジンへ渡らないことがある
+    ///
+    /// 無音の見張りは取り消すだけで完走を待たない。取り消しで戻らない待ちもあり、戻った見張りは閉じた記録に何もしない。
+    /// 無音での自動停止は見張りのタスクの上で閉じるため、見張りは閉じる前に自分を外し、ここから取り消されないようにしている
     private func close(
         _ reason: SessionEndReason,
         waitingForForwarding: Bool,
@@ -265,6 +283,9 @@ public actor RecordingSession {
     ) async {
         guard isRunning else { return }
         setState(.stopping)
+        silenceWatchdog?.cancel()
+        silenceWatchdog = nil
+        silenceMonitor = nil
         let slots = activeFeeds
         activeFeeds.removeAll()
         for slot in slots where !slot.isStartingCapture {
@@ -450,8 +471,11 @@ public actor RecordingSession {
     private func handle(_ event: TranscriptEvent) async {
         switch event {
         case let .volatile(text):
+            noteSpeech(text)
             eventContinuation.yield(.liveTranscript(text))
         case let .finalized(segment):
+            // 届いた時点で数え直す。翻訳を待つ間（最大 translationTimeout）を無音に数えない
+            noteSpeech(segment.text)
             let segment = await translated(segment)
             do {
                 try await store.append(segment)
@@ -462,6 +486,42 @@ public actor RecordingSession {
                 eventContinuation.yield(.storeError(error.localizedDescription))
             }
         }
+    }
+
+    /// 無音を見張っている記録なら、発話とみなせる結果が届いた時刻から無音を数え直す
+    private func noteSpeech(_ text: String) {
+        silenceMonitor?.recordActivity(text, at: now())
+    }
+
+    /// 無音が timeout 続いたら閉じる見張りを始める。確かめる間隔は silenceCheckInterval で、
+    /// timeout がそれより短ければ timeout ごとに確かめる（間隔ごとでは timeout の何倍も遅れて止まる）
+    private func watchSilence(timeout: Duration, run: UUID) {
+        silenceMonitor = SilenceMonitor(timeout: timeout, startedAt: now())
+        let interval = min(silenceCheckInterval, timeout)
+        silenceWatchdog = Task { [weak self, sleep] in
+            repeat {
+                // 取り消されたら抜ける（停止と失敗で閉じたとき）
+                do {
+                    try await sleep(interval)
+                } catch {
+                    return
+                }
+            } while await self?.checkSilence(run: run) == true
+        }
+    }
+
+    /// 見張りの1回ぶんの確認。見張りを続けるなら true を返す。
+    /// 閉じた記録や、閉じた後に始まった次の記録には何もしない。取り消しでは戻らない待ちもあるため
+    private func checkSilence(run: UUID) async -> Bool {
+        guard runID == run, state == .recording, let monitor = silenceMonitor else { return false }
+        guard monitor.isExpired(at: now()) else { return true }
+        // 閉じるのはこの見張りのタスクの上で行う。close が見張りを取り消すと、取り消されたタスクで engine.finish が走り、
+        // SpeechAnalyzer の finalize や Task.sleep が CancellationError で抜けて残りの結果を落とす。
+        // 取り消されないよう、閉じる前に自分を外す
+        silenceWatchdog = nil
+        eventContinuation.yield(.autoStopped(silence: monitor.timeout))
+        await close(.autoStopped, waitingForForwarding: true)
+        return false
     }
 
     /// 訳を載せて返す。翻訳器が無い・失敗・時間切れのときは原文のまま返し、記録は止めない

@@ -157,6 +157,12 @@ struct PopoverView: View {
 
     private var transcriptArea: some View {
         VStack(alignment: .leading, spacing: 6) {
+            // 知らせは次の記録の開始（.preparing）で消えるため、状態では出し分けない
+            if let autoStopNotice = state.autoStopNotice {
+                Label(autoStopNotice, systemImage: "moon.zzz")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
             if state.liveText.isEmpty, state.lastSegmentText.isEmpty {
                 Text(state.isRecording ? "聞き取り中…" : "開始するとここにライブ字幕が流れます")
                     .font(.caption)

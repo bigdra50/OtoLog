@@ -5,7 +5,7 @@ import OtoLogCore
 /// 記録の経緯を後から追えるようにする記録。
 ///
 /// 記録の失敗はポップオーバーにしか出ず、アプリを再起動すると消える。
-/// どの音源がいつ・なぜ止まったかを残すため、開始要求・状態遷移・キャプチャの中断・
+/// どの音源がいつ・なぜ止まったかを残すため、開始要求・状態遷移・キャプチャの中断・無音での自動停止・
 /// 保存と翻訳の失敗・完了したセッションを、統合ログ（category recording）と
 /// XDG_STATE_HOME/otolog/recording.log の両方へ出す。
 /// 前者は log stream で追いやすく、後者は統合ログが消えた後も残る。
@@ -62,6 +62,8 @@ struct RecordingLog {
                 self.init(level: .error, message: "store error: \(message)")
             case let .translationError(message):
                 self.init(level: .error, message: "translation error: \(message)")
+            case let .autoStopped(silence):
+                self.init(level: .info, message: "auto-stopped: silence for \(Self.describe(silence))")
             case let .sessionFinished(ref):
                 self.init(level: .info, message: "session finished: \(ref.directoryName)")
             case .preparationProgress, .liveTranscript, .segmentRecorded:
@@ -81,6 +83,14 @@ struct RecordingLog {
                 message: "start requested: via=\(origin.rawValue) input=\(inputMode.rawValue) "
                     + "locales=\(locales.joined(separator: ","))"
             )
+        }
+
+        // MARK: Private
+
+        /// 無音の長さ。設定は分単位なので分で書き、割り切れないときだけ秒で書く
+        private static func describe(_ silence: Duration) -> String {
+            let seconds = silence.components.seconds
+            return seconds % 60 == 0 ? "\(seconds / 60)m" : "\(seconds)s"
         }
     }
 

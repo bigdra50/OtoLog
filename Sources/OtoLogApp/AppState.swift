@@ -35,6 +35,8 @@ struct PipelineTaskDisplay: Equatable, Identifiable {
     var preparationProgress: Double = 0
     var storeErrorMessage: String?
     var translationErrorMessage: String?
+    /// 無音で自動停止したことの知らせ。次の記録を始めるまでポップオーバーに出す
+    var autoStopNotice: String?
 
     var generationState: GenerationState = .idle
     var generationSessions: [SessionRef] = []
