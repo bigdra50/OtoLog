@@ -3,7 +3,7 @@ import Foundation
 import OtoLogCore
 import Testing
 
-/// SessionEvent を AppState へ映す RecordingCoordinator の振る舞いを守るテスト。
+/// SessionEvent を AppState へ映すことと、記録の開始に設定を渡すことを守るテスト。
 @MainActor struct RecordingCoordinatorTests {
     /// 無音で自動停止した後に、停止と同じ閉じ方で続けて流れるイベント
     nonisolated static let closingEvents: [SessionEvent] = [
@@ -49,6 +49,56 @@ import Testing
         fixture.coordinator.apply(.stateChanged(.preparing))
 
         #expect(fixture.state.autoStopNotice == nil)
+        await fixture.tearDown()
+    }
+
+    // MARK: 無音で自動停止する設定
+
+    /// otolog-devtool ctl start で始めた記録も、ポップオーバーと同じ設定で無音を見張る。見張りは15秒ごとに確かめる
+    @Test func ctlから始めた記録も設定に従って無音を見張る() async {
+        let fixture = RecordingCoordinatorFixture()
+        fixture.settings.silenceAutoStopMinutes = 10
+
+        let response = await fixture.coordinator.controlStart()
+
+        #expect(response.ok)
+        #expect(await eventually { fixture.sleeps.requestedDurations == [.seconds(15)] })
+        await fixture.tearDown()
+    }
+
+    @Test func オフならctlから始めた記録は無音を見張らない() async {
+        let fixture = RecordingCoordinatorFixture()
+        fixture.settings.silenceAutoStopMinutes = 0
+
+        let response = await fixture.coordinator.controlStart()
+        // 見張りがあれば、止め終えるまでの間に最初の待ちへ入っている
+        await fixture.session.stop()
+
+        #expect(response.ok)
+        #expect(fixture.sleeps.requestedDurations.isEmpty)
+        await fixture.tearDown()
+    }
+
+    @Test func ポップオーバーから始めた記録も設定に従って無音を見張る() async {
+        let fixture = RecordingCoordinatorFixture()
+        fixture.settings.silenceAutoStopMinutes = 10
+
+        fixture.coordinator.toggle()
+
+        #expect(await eventually { fixture.sleeps.requestedDurations == [.seconds(15)] })
+        await fixture.tearDown()
+    }
+
+    @Test func オフならポップオーバーから始めた記録は無音を見張らない() async {
+        let fixture = RecordingCoordinatorFixture()
+        fixture.settings.silenceAutoStopMinutes = 0
+
+        fixture.coordinator.toggle()
+        #expect(await eventually { await fixture.session.state == .recording })
+        // 見張りがあれば、止め終えるまでの間に最初の待ちへ入っている
+        await fixture.session.stop()
+
+        #expect(fixture.sleeps.requestedDurations.isEmpty)
         await fixture.tearDown()
     }
 }
