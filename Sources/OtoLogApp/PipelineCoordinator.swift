@@ -50,7 +50,8 @@ import OtoLogCore
         }
     }
 
-    func run(playbook: Playbook, session: SessionRef, only: [String]? = nil) {
+    /// saveDirectory は session がある保存先。省略すると今の設定の保存先を使う
+    func run(playbook: Playbook, session: SessionRef, only: [String]? = nil, in saveDirectory: URL? = nil) {
         guard !state.pipelineRunning else { return }
         state.pipelineRunning = true
 
@@ -72,7 +73,7 @@ import OtoLogCore
             uniquingKeysWith: { first, _ in first }
         )
         let runner = PipelineRunner(
-            saveDirectory: settings.saveDirectory,
+            saveDirectory: saveDirectory ?? settings.saveDirectory,
             timeZone: .current,
             generatorFactory: { task in
                 ClaudeCLIGenerator(
