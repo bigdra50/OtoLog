@@ -7,6 +7,7 @@ struct SettingsView: View {
 
     @Bindable var settings: AppSettings
 
+    let state: AppState
     let coordinator: RecordingCoordinator
 
     var body: some View {
@@ -57,7 +58,11 @@ struct SettingsView: View {
                     .lineLimit(1)
                     .truncationMode(.middle)
                 Spacer()
-                IconButton(systemImage: "folder", label: "保存先を変更…") { chooseDirectory() }
+                IconButton(
+                    systemImage: "folder",
+                    label: state.isSessionOpen ? "記録中は保存先を変更できません" : "保存先を変更…"
+                ) { chooseDirectory() }
+                    .disabled(state.isSessionOpen)
             }
 
             HStack {

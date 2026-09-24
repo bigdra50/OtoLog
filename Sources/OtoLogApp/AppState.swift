@@ -51,4 +51,12 @@ struct PipelineTaskDisplay: Equatable, Identifiable {
     var isRecording: Bool {
         sessionState == .recording
     }
+
+    /// 記録が開いている間（準備・記録・閉じる処理の途中）。この間は保存先を変えない
+    var isSessionOpen: Bool {
+        switch sessionState {
+        case .preparing, .recording, .stopping: true
+        case .idle, .failed: false
+        }
+    }
 }
