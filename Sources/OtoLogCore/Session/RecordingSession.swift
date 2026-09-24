@@ -321,8 +321,10 @@ public actor RecordingSession {
             try await startCaptureAndForward(slotID: slotID)
         } catch {
             // 起動できなかったのも連続した中断の1回として数え、同じ手順でやり直すか諦める。
+            // 起動を待つ間（許可の確認など）に stableInterval が過ぎても数え直さないよう、時刻は失敗した時点に取り直す。
             // 動いていないキャプチャの受け持ちは戻し、諦めて畳むときは他のフィードと同じく止めさせる
             if let index = activeIndex(of: slotID) {
+                activeFeeds[index].lastRestartAt = now()
                 activeFeeds[index].isRestarting = false
             }
             await attemptCaptureRestart(slotID: slotID, reason: error.localizedDescription)

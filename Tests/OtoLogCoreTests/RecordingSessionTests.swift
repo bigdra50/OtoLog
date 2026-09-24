@@ -643,6 +643,24 @@ struct RecordingSessionTests {
         #expect(sut.capture.stopCallCount == 3)
     }
 
+    /// 起動に stableInterval 以上かかってから投げても（許可の確認待ちなど）、連続した中断の1回として数える。
+    /// 起動を待った時間を動いた時間に数えると、起動できないまま1回目の再起動を繰り返して諦めない
+    @Test func restartWhoseStartThrowsAfterStableIntervalStillCountsAsConsecutive() async {
+        let clock = TestClock()
+        let policy = CaptureRestartPolicy.default
+        let sut = await makeStartedSUT(now: { clock.now })
+        sut.capture.onStart = { clock.advance(by: policy.stableInterval) }
+        // 数え直してしまう場合もテストが終わるよう、投げるのは上限の回数に限る
+        sut.capture.startErrors = Array(
+            repeating: Described(message: "起動できない"), count: policy.maxConsecutiveRestarts
+        )
+
+        sut.capture.fail(Described(message: "止まった"))
+
+        #expect(await eventually { await sut.session.state == .failed("システム音声: 起動できない") })
+        #expect(await eventually { restartAttempts(in: sut.collector.events) == [1, 2, 3, nil] })
+    }
+
     // MARK: 翻訳
 
     /// 訳はセグメントへ載せてから保存する。ストアには訳つきの1件だけが渡る
