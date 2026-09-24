@@ -837,7 +837,7 @@ struct RecordingSessionTests {
 
     /// 失敗で閉じるときも同じく知らせ、失敗の理由を残して failed で終える。
     /// 閉じたセッションの参照は finalize から得るため、保存できた発話があっても完了は知らせない
-    @Test func failureReportsAFailedFinalizeAndStillEndsFailed() async {
+    @Test func failureReportsAFailedFinalizeAndStillEndsFailed() async throws {
         let sut = await makeStartedSUT()
         sut.engine.send(.finalized(TestFixtures.segment(text: "確定")))
         #expect(await eventually { await sut.store.segments.count == 1 })
@@ -848,7 +848,10 @@ struct RecordingSessionTests {
         let failed = SessionState.failed("システム音声: 認識が止まった")
         #expect(await eventually { sut.collector.events.contains(.stateChanged(failed)) })
         let events = sut.collector.events
-        #expect(events.contains(.storeError("記録を閉じられませんでした: ボリュームが外れた")))
+        let storeError = SessionEvent.storeError("記録を閉じられませんでした: ボリュームが外れた")
+        let storeErrorIndex = try #require(events.firstIndex(of: storeError))
+        let failedIndex = try #require(events.firstIndex(of: .stateChanged(failed)))
+        #expect(storeErrorIndex < failedIndex)
         #expect(await sut.store.finalizedReasons == [.failed("システム音声: 認識が止まった")])
         #expect(finishedSessions(in: events).isEmpty)
         #expect(await sut.session.state == failed)
