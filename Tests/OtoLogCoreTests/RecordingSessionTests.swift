@@ -1139,6 +1139,35 @@ struct RecordingSessionTests {
         #expect(!sut.collector.events.contains(where: isAutoStop))
     }
 
+    /// 無音は記録が始まってから数える。準備（認識モデルのダウンロード）が timeout より長引いても、準備の間は見張らない。
+    /// 準備の間から見張ると、準備の時間まで無音に数えて早く止めるか、最初の確認で .preparing を見て見張りを終え、その記録は無音で止まらなくなる
+    @Test func silenceIsCountedFromTheStartOfRecordingNotFromPreparation() async {
+        let clock = TestClock()
+        let preparation = ManualSleep(holding: true)
+        let watchdog = ManualSleep(holding: true)
+        let sut = makeSUT(now: { clock.now }, sleep: { await watchdog.sleep(for: $0) })
+        sut.engine.onPrepare = { await preparation.sleep(for: .zero) }
+        let starting = Task { await sut.session.start(feeds: sut.feeds, locales: [ja], silenceTimeout: .seconds(60)) }
+        #expect(await eventually { preparation.waitingCount == 1 })
+        // 準備の間に見張りが確かめる時期を過ぎた
+        clock.advance(by: .seconds(90))
+        watchdog.step()
+        preparation.release()
+        await starting.value
+        let recordingStartedAt = clock.now
+
+        #expect(await eventually { watchdog.waitingCount == 1 })
+        clock.advance(by: .seconds(59))
+        await stepWatchdogExpectingItToKeepWatching(watchdog)
+        #expect(await sut.session.state == .recording)
+        clock.advance(by: .seconds(1))
+        watchdog.step()
+
+        #expect(await eventually { await sut.session.state == .idle })
+        #expect(await sut.store.finalizedReasons == [.autoStopped])
+        #expect(await sut.store.finalizedAts == [recordingStartedAt.addingTimeInterval(60)])
+    }
+
     /// 停止は見張りを取り消す。見張りは待ちから戻ったところで取り消しに気づいて抜ける
     @Test func stopCancelsTheSilenceWatchdog() async {
         let gate = ManualSleep(holding: true)
