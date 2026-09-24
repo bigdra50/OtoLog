@@ -16,9 +16,9 @@ final class FakeTranscriptionEngine: TranscriptionEngine, @unchecked Sendable {
     var onPrepare: (@Sendable () async -> Void)?
     var onStart: (@Sendable () async -> Void)?
     /// finish でイベント列を閉じる前に流すイベント。
-    /// 実エンジンが言語の判定待ちで持っていたセグメントを finish で吐き出すのを再現する。
-    /// 取り消されたタスクで finish したときは流さない。実エンジンの吐き出し（SpeechAnalyzer の finalize）は
-    /// CancellationError で打ち切られ、残りの結果を出さずに終わる
+    /// 実エンジンが finish で吐き出す結果（finalize が確定させる残りの音声、言語の判定待ちで持っていたセグメント）を再現する。
+    /// 取り消されたタスクで finish したときは流さない。実エンジンでは SpeechAnalyzer の finalize が CancellationError で抜け、
+    /// finalize が確定させるはずだった結果が届く前にイベント列が閉じる（判定待ちのセグメントは finalize の後に吐き出すので残る）
     var eventsOnFinish: [TranscriptEvent] = []
 
     var prepareCallCount: Int {

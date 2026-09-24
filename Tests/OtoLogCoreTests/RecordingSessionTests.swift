@@ -1239,23 +1239,23 @@ struct RecordingSessionTests {
         later.release()
     }
 
-    /// 自動停止は見張りのタスクの上で閉じる。閉じる側がそのタスクを取り消すと、engine.finish の吐き出しが
-    /// 打ち切られ（SpeechAnalyzer の finalize は CancellationError で抜ける）、判定待ちのセグメントを落とす
+    /// 自動停止は見張りのタスクの上で閉じる。閉じる側がそのタスクを取り消すと、取り消されたタスクで engine.finish が走り
+    /// （SpeechAnalyzer の finalize は CancellationError で抜ける）、finalize が確定させる最後の発話を落とす
     @Test func autoStopStoresTheSegmentsEmittedDuringFinish() async {
         let clock = TestClock()
         let watchdog = ManualSleep(holding: true)
         let sut = await makeStartedSUT(
             now: { clock.now }, sleep: { await watchdog.sleep(for: $0) }, silenceTimeout: .seconds(60)
         )
-        let pending = TestFixtures.segment(text: "言語の判定待ち")
-        sut.engine.eventsOnFinish = [.finalized(pending)]
+        let lastWords = TestFixtures.segment(text: "finalize で確定した最後の発話")
+        sut.engine.eventsOnFinish = [.finalized(lastWords)]
         #expect(await eventually { watchdog.waitingCount == 1 })
 
         clock.advance(by: .seconds(60))
         watchdog.step()
 
         #expect(await eventually { await sut.session.state == .idle })
-        #expect(await sut.store.segments == [pending])
+        #expect(await sut.store.segments == [lastWords])
         #expect(await sut.store.finalizedReasons == [.autoStopped])
     }
 

@@ -206,10 +206,10 @@ struct TestDoubleTests {
     }
 
     /// 取り消されたタスクで finish すると、eventsOnFinish を流さずにイベント列を閉じる。
-    /// 実エンジンの吐き出し（SpeechAnalyzer の finalize）が CancellationError で打ち切られるのと同じ
+    /// 実エンジンで SpeechAnalyzer の finalize が CancellationError で抜け、確定させるはずだった結果が届かないのと同じ
     @Test func fakeEngineDropsEventsOnFinishWhenFinishedOnACancelledTask() async throws {
         let engine = FakeTranscriptionEngine()
-        engine.eventsOnFinish = [.finalized(TestFixtures.segment(text: "判定待ち"))]
+        engine.eventsOnFinish = [.finalized(TestFixtures.segment(text: "finalize で確定した発話"))]
         let source = FakeCaptureSource()
         let chunks = try await source.start(targetFormat: format)
         let context = TranscriptionContext(
