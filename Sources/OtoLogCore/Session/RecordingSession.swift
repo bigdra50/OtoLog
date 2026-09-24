@@ -149,7 +149,7 @@ public actor RecordingSession {
         }
         activeFeeds.removeAll()
         // 全 append 完了後にセッションを閉じる。finalize 失敗は記録済みデータに影響しないため握る
-        if let ref = try? await store.finalize(endedAt: now()) {
+        if let ref = try? await store.finalize(endedAt: now(), reason: .stopped) {
             eventContinuation.yield(.sessionFinished(ref))
         }
         setState(.idle)

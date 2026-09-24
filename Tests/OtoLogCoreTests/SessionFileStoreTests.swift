@@ -36,7 +36,7 @@ struct SessionFileStoreTests {
         try await withTempDir { dir in
             let store = SessionFileStore(directory: dir, timeZone: jst)
             try await store.begin(context: context)
-            _ = try await store.finalize(endedAt: Date(timeIntervalSince1970: 1_785_297_660))
+            _ = try await store.finalize(endedAt: Date(timeIntervalSince1970: 1_785_297_660), reason: .stopped)
             try await store.begin(context: context)
 
             #expect(FileManager.default.fileExists(atPath: dir.appendingPathComponent("2026-07-29/1300").path))
@@ -110,7 +110,7 @@ struct SessionFileStoreTests {
             try await store.begin(context: context)
             let endedAt = Date(timeIntervalSince1970: 1_785_301_200)
 
-            let ref = try await store.finalize(endedAt: endedAt)
+            let ref = try await store.finalize(endedAt: endedAt, reason: .stopped)
 
             #expect(ref?.directoryName == "2026-07-29/1300")
             #expect(ref?.title == nil)
@@ -122,10 +122,45 @@ struct SessionFileStoreTests {
         }
     }
 
+    /// 止めた記録は終わり方だけを書き、理由の文言は持たない
+    @Test func finalizeRecordsStoppedWithoutMessage() async throws {
+        try await withTempDir { dir in
+            let store = SessionFileStore(directory: dir, timeZone: jst)
+            try await store.begin(context: context)
+
+            _ = try await store.finalize(endedAt: Date(timeIntervalSince1970: 1_785_301_200), reason: .stopped)
+
+            let meta = try SessionMetaCoder.decode(Data(
+                contentsOf: dir.appendingPathComponent("2026-07-29/1300/meta.json")
+            ))
+            #expect(meta.endReason == "stopped")
+            #expect(meta.endMessage == nil)
+        }
+    }
+
+    /// 失敗で閉じた記録には、ポップオーバーに出したのと同じ理由を残す。再起動した後でも何で止まったかを追えるように
+    @Test func finalizeRecordsFailureWithMessage() async throws {
+        try await withTempDir { dir in
+            let store = SessionFileStore(directory: dir, timeZone: jst)
+            try await store.begin(context: context)
+
+            _ = try await store.finalize(
+                endedAt: Date(timeIntervalSince1970: 1_785_301_200), reason: .failed("マイク: 止まった")
+            )
+
+            let meta = try SessionMetaCoder.decode(Data(
+                contentsOf: dir.appendingPathComponent("2026-07-29/1300/meta.json")
+            ))
+            #expect(meta.endReason == "failed")
+            #expect(meta.endMessage == "マイク: 止まった")
+            #expect(meta.schemaVersion == 2)
+        }
+    }
+
     @Test func finalizeWithoutBeginReturnsNil() async throws {
         try await withTempDir { dir in
             let store = SessionFileStore(directory: dir, timeZone: jst)
-            let ref = try await store.finalize(endedAt: Date(timeIntervalSince1970: 1_785_301_200))
+            let ref = try await store.finalize(endedAt: Date(timeIntervalSince1970: 1_785_301_200), reason: .stopped)
             #expect(ref == nil)
         }
     }
@@ -154,7 +189,7 @@ struct SessionFileStoreTests {
                 try await store.begin(context: context)
                 await store.updateDirectory(newRoot)
                 try await store.append(TestFixtures.segment(text: "旧ルートに残る"))
-                _ = try await store.finalize(endedAt: Date(timeIntervalSince1970: 1_785_301_200))
+                _ = try await store.finalize(endedAt: Date(timeIntervalSince1970: 1_785_301_200), reason: .stopped)
 
                 try await store.begin(context: context)
 

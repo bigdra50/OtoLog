@@ -99,6 +99,7 @@ struct RecordingSessionTests {
 
         #expect(await eventually { sut.collector.events.contains(.sessionFinished(ref)) })
         #expect(await sut.store.finalizedAts == [endedAt])
+        #expect(await sut.store.finalizedReasons == [.stopped])
     }
 
     @Test func stopWhenIdleDoesNotFinalize() async {

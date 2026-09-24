@@ -8,11 +8,13 @@ public struct SessionMeta: Sendable, Equatable, Codable {
     // MARK: Lifecycle
 
     public init(
-        schemaVersion: Int = 1,
+        schemaVersion: Int = 2,
         sessionID: UUID,
         title: String? = nil,
         startedAt: Date,
         endedAt: Date? = nil,
+        endReason: String? = nil,
+        endMessage: String? = nil,
         locale: String,
         source: AudioSourceKind,
         playbookID: String? = nil,
@@ -23,6 +25,8 @@ public struct SessionMeta: Sendable, Equatable, Codable {
         self.title = title
         self.startedAt = startedAt
         self.endedAt = endedAt
+        self.endReason = endReason
+        self.endMessage = endMessage
         self.locale = locale
         self.source = source
         self.playbookID = playbookID
@@ -31,16 +35,38 @@ public struct SessionMeta: Sendable, Equatable, Codable {
 
     // MARK: Public
 
+    /// 2 で終わり方（endReason / endMessage）を足した。足した項目は省略できるので、1 のファイルもそのまま読める
     public var schemaVersion: Int
     public var sessionID: UUID
     public var title: String?
     public var startedAt: Date
     public var endedAt: Date?
+    /// 終わり方（"stopped" / "autoStopped" / "failed"）。記録中と、スキーマ1で書かれたファイルでは nil。
+    /// 列挙型にしないのは、知らない値を書いた新しい版のファイルも読めるようにするため
+    public var endReason: String?
+    /// 失敗で終わったときの理由。ポップオーバーに出したのと同じ文言
+    public var endMessage: String?
     public var locale: String
     public var source: AudioSourceKind
     /// 最後に実行したプレイブックとタスク状態（パイプライン未実行なら nil）
     public var playbookID: String?
     public var pipeline: [String: PipelineTaskState]?
+
+    /// 閉じた時刻と終わり方を書き込む。理由の文言は失敗のときだけ残す
+    public mutating func markEnded(at date: Date, reason: SessionEndReason) {
+        endedAt = date
+        switch reason {
+        case .stopped:
+            endReason = "stopped"
+            endMessage = nil
+        case .autoStopped:
+            endReason = "autoStopped"
+            endMessage = nil
+        case let .failed(message):
+            endReason = "failed"
+            endMessage = message
+        }
+    }
 }
 
 // MARK: - SessionMetaCoder

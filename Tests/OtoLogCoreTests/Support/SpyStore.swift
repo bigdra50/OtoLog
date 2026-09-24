@@ -8,6 +8,8 @@ actor SpyStore: TranscriptStore {
     private(set) var beganContexts: [TranscriptionContext] = []
     private(set) var segments: [TranscriptSegment] = []
     private(set) var finalizedAts: [Date] = []
+    /// finalize に渡された終わり方。呼ばれた順
+    private(set) var finalizedReasons: [SessionEndReason] = []
 
     /// finalize が返す参照。既定はディレクトリ名固定のダミー
     var finalizeResult: SessionRef? = SessionRef(
@@ -29,8 +31,9 @@ actor SpyStore: TranscriptStore {
         segments.append(segment)
     }
 
-    func finalize(endedAt: Date) throws -> SessionRef? {
+    func finalize(endedAt: Date, reason: SessionEndReason) throws -> SessionRef? {
         finalizedAts.append(endedAt)
+        finalizedReasons.append(reason)
         onFinalize?()
         return beganContexts.isEmpty ? nil : finalizeResult
     }
