@@ -41,7 +41,8 @@ public struct SessionMeta: Sendable, Equatable, Codable {
     public var title: String?
     public var startedAt: Date
     public var endedAt: Date?
-    /// 終わり方（"stopped" / "autoStopped" / "failed"）。記録中と、スキーマ1で書かれたファイルでは nil。
+    /// 終わり方（"stopped" / "autoStopped" / "failed"）。終わり方が分からない記録では nil
+    /// （記録中、スキーマ1で書かれたファイル、日次ファイルから移行したセッション）。
     /// 列挙型にしないのは、知らない値を書いた新しい版のファイルも読めるようにするため
     public var endReason: String?
     /// 失敗で終わったときの理由。ポップオーバーに出したのと同じ文言

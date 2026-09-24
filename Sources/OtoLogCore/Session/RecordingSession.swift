@@ -391,7 +391,7 @@ public actor RecordingSession {
         // 1回の構成変更で中断の通知は続けて届くため、落ち着くのを待ってから再起動する
         activeFeeds[index].isStartingCapture = true
         await capture.stop()
-        // 待ちが投げても（中継タスクのキャンセル）、続く確認で記録がまだ続いているかを見て決める
+        // 待ちが途中で投げても握る。再起動するかどうかは、続く確認で記録がまだ続いているかを見て決める
         try? await sleep(restartPolicy.settleDelay)
         // actor は再入するため、待つ間に stop や失敗の片付けが走り、次の記録が始まっていることもある
         guard state == .recording, let index = activeIndex(of: slotID) else { return }
