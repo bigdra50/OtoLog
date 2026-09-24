@@ -326,8 +326,14 @@ public actor RecordingSession {
     /// 確保していない（できなかった）記録には閉じるものが無い
     private func finalizeStore(_ reason: SessionEndReason) async -> SessionRef? {
         guard let storeBegin, case .success = await storeBegin.result else { return nil }
-        // finalize 失敗は記録済みデータに影響しないため握る
-        return try? await store.finalize(endedAt: now(), reason: reason)
+        do {
+            return try await store.finalize(endedAt: now(), reason: reason)
+        } catch {
+            // 保存済みの発話は失われないため、閉じる手順はこのまま進める。
+            // ただし終わりの時刻と理由が残らず、完了も知らせられないので、黙らずに保存エラーとして出す
+            eventContinuation.yield(.storeError("記録を閉じられませんでした: \(error.localizedDescription)"))
+            return nil
+        }
     }
 
     private func activeIndex(of slotID: FeedSlot.ID) -> Int? {

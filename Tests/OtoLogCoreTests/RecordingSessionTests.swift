@@ -814,6 +814,46 @@ struct RecordingSessionTests {
         #expect(!sut.collector.events.contains { if case .stateChanged(.failed) = $0 { true } else { false } })
     }
 
+    // MARK: 閉じられなかったとき（meta.json を書けない）
+
+    /// 閉じられなかったことを保存エラーとして知らせる。黙っていると終わりの無い記録が残り、タイトル生成も走らない。
+    /// 閉じる手順は最後まで進め、停止は idle で終える
+    @Test func stopReportsAFailedFinalizeAsAStoreError() async throws {
+        let sut = await makeStartedSUT()
+        await sut.store.setFinalizeError(Described(message: "ボリュームが外れた"))
+
+        await sut.session.stop()
+
+        #expect(await sut.session.state == .idle)
+        #expect(await eventually { sut.collector.events.contains(.stateChanged(.idle)) })
+        let events = sut.collector.events
+        let storeError = SessionEvent.storeError("記録を閉じられませんでした: ボリュームが外れた")
+        let storeErrorIndex = try #require(events.firstIndex(of: storeError))
+        let idleIndex = try #require(events.firstIndex(of: .stateChanged(.idle)))
+        #expect(storeErrorIndex < idleIndex)
+        #expect(await sut.store.finalizedReasons == [.stopped])
+        #expect(finishedSessions(in: events).isEmpty)
+    }
+
+    /// 失敗で閉じるときも同じく知らせ、失敗の理由を残して failed で終える。
+    /// 閉じたセッションの参照は finalize から得るため、保存できた発話があっても完了は知らせない
+    @Test func failureReportsAFailedFinalizeAndStillEndsFailed() async {
+        let sut = await makeStartedSUT()
+        sut.engine.send(.finalized(TestFixtures.segment(text: "確定")))
+        #expect(await eventually { await sut.store.segments.count == 1 })
+        await sut.store.setFinalizeError(Described(message: "ボリュームが外れた"))
+
+        sut.engine.failEvents(Described(message: "認識が止まった"))
+
+        let failed = SessionState.failed("システム音声: 認識が止まった")
+        #expect(await eventually { sut.collector.events.contains(.stateChanged(failed)) })
+        let events = sut.collector.events
+        #expect(events.contains(.storeError("記録を閉じられませんでした: ボリュームが外れた")))
+        #expect(await sut.store.finalizedReasons == [.failed("システム音声: 認識が止まった")])
+        #expect(finishedSessions(in: events).isEmpty)
+        #expect(await sut.session.state == failed)
+    }
+
     // MARK: 開始の途中の停止
 
     /// 認識モデルを準備している間に止められたら、保存先を確保せずに終える

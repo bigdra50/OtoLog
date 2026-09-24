@@ -42,7 +42,8 @@ public enum SessionEvent: Sendable, Equatable {
     /// volatile 結果。表示のみでストレージへは行かない
     case liveTranscript(String)
     case segmentRecorded(TranscriptSegment)
-    /// 保存失敗。セッション自体は継続する
+    /// 保存の失敗。発話の追記に失敗しても記録は続く。
+    /// 閉じるとき（finalize）の失敗でも閉じる手順は最後まで進むが、meta.json に終わりが残らず sessionFinished も流れない
     case storeError(String)
     /// 翻訳失敗。原文だけが保存され、セッション自体は継続する
     case translationError(String)
@@ -53,6 +54,7 @@ public enum SessionEvent: Sendable, Equatable {
     /// 続いて停止と同じく stopping・sessionFinished・idle が流れる
     case autoStopped(silence: Duration)
     /// 記録を閉じた（全セグメント保存済み）。タイトル生成やパイプラインの起点。
-    /// 停止と無音での自動停止では毎回、失敗では1件以上保存できたときだけ流れる
+    /// 停止と無音での自動停止では毎回、失敗では1件以上保存できたときだけ流れる。
+    /// どの終わり方でも、meta.json に終わりを書けなかったとき（storeError）は流れない
     case sessionFinished(SessionRef)
 }

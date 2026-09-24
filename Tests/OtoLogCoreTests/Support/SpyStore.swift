@@ -36,10 +36,12 @@ actor SpyStore: TranscriptStore {
         onAppend?()
     }
 
+    /// 呼ばれたことは finalizedAts と finalizedReasons に残してから、finalizeError を投げる
     func finalize(endedAt: Date, reason: SessionEndReason) throws -> SessionRef? {
         finalizedAts.append(endedAt)
         finalizedReasons.append(reason)
         onFinalize?()
+        if let finalizeError { throw finalizeError }
         return beganContexts.isEmpty ? nil : finalizeResult
     }
 
@@ -67,8 +69,13 @@ actor SpyStore: TranscriptStore {
         finalizeResult = ref
     }
 
+    func setFinalizeError(_ error: (any Error)?) {
+        finalizeError = error
+    }
+
     // MARK: Private
 
     private var errorToThrow: (any Error)?
     private var beginError: (any Error)?
+    private var finalizeError: (any Error)?
 }
