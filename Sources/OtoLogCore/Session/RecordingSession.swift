@@ -516,7 +516,7 @@ public actor RecordingSession {
         guard runID == run, state == .recording, let monitor = silenceMonitor else { return false }
         guard monitor.isExpired(at: now()) else { return true }
         // 閉じるのはこの見張りのタスクの上で行う。close が見張りを取り消すと、取り消されたタスクで engine.finish が走り、
-        // SpeechAnalyzer の finalize や Task.sleep が CancellationError で抜けて残りの結果を落とす。
+        // SpeechAnalyzer の finalize が CancellationError で抜けて残りの結果を落とす。
         // 取り消されないよう、閉じる前に自分を外す
         silenceWatchdog = nil
         eventContinuation.yield(.autoStopped(silence: monitor.timeout))
