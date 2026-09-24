@@ -425,6 +425,25 @@ struct RecordingSessionTests {
         #expect(sut.capture.startCallCount == 4)
     }
 
+    /// 数え直すかどうかは最後の再起動から測る。stableInterval に満たない間隔で中断が続けば、
+    /// 最初の再起動からは stableInterval を超えていても連続として数え、上限を超えたら諦める
+    @Test func stableIntervalIsMeasuredFromTheLatestRestart() async {
+        let clock = TestClock()
+        let sut = await makeStartedSUT(now: { clock.now })
+        let shortOfStable = CaptureRestartPolicy.default.stableInterval - .seconds(1)
+
+        for count in 1...3 {
+            clock.advance(by: shortOfStable)
+            sut.capture.fail(Described(message: "\(count)回目"))
+            #expect(await eventually { sut.capture.startCallCount == count + 1 })
+        }
+        clock.advance(by: shortOfStable)
+        sut.capture.fail(Described(message: "4回目"))
+
+        #expect(await eventually { await sut.session.state == .failed("システム音声: 4回目") })
+        #expect(await eventually { restartAttempts(in: sut.collector.events) == [1, 2, 3, nil] })
+    }
+
     /// 止めずに起動し直すと前回のタップやエンジンが残る。止めて、待ってから起動する
     @Test func restartStopsTheCaptureAndSettlesBeforeStartingItAgain() async {
         let order = OrderLog()
