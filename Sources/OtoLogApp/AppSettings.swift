@@ -80,6 +80,9 @@ private extension UserDefaults {
         audioInputMode = defaults.nonEmptyString(forKey: Self.audioInputModeKey)
             .flatMap(AudioInputMode.init(rawValue:)) ?? .system
         microphoneDeviceUID = defaults.nonEmptyString(forKey: Self.microphoneDeviceUIDKey)
+        // integer(forKey:) は未設定でも 0（オフ）になるため、既定の30分は object の有無で判定する
+        silenceAutoStopMinutes = defaults.object(forKey: Self.silenceAutoStopMinutesKey) as? Int
+            ?? Self.defaultSilenceAutoStopMinutes
     }
 
     // MARK: Internal
@@ -95,6 +98,9 @@ private extension UserDefaults {
 
     /// 自動検出の既定候補。何語か分からない音源で当たりやすい順に並べる
     static let defaultRecognitionCandidates = ["en-US", "ja-JP"]
+
+    /// 無音で自動停止するまでの分数の選択肢。0 はオフ
+    static let silenceAutoStopChoices = [0, 10, 15, 30, 60]
 
     var localeIdentifier: String {
         didSet { defaults.set(localeIdentifier, forKey: Self.localeKey) }
@@ -150,6 +156,16 @@ private extension UserDefaults {
         didSet { defaults.set(microphoneDeviceUID, forKey: Self.microphoneDeviceUIDKey) }
     }
 
+    /// 無音がこの分数続いたら記録を止める。0 はオフ。次の記録開始から反映される
+    var silenceAutoStopMinutes: Int {
+        didSet { defaults.set(silenceAutoStopMinutes, forKey: Self.silenceAutoStopMinutesKey) }
+    }
+
+    /// 記録へ渡す無音の上限。オフなら nil
+    var silenceTimeout: Duration? {
+        silenceAutoStopMinutes > 0 ? .seconds(silenceAutoStopMinutes * 60) : nil
+    }
+
     /// 実際に認識へ渡す候補。先頭は判定できなかったときの落としどころになる
     var resolvedRecognitionLocales: [String] {
         guard localeIdentifier == Self.autoRecognitionLocale else { return [localeIdentifier] }
@@ -187,6 +203,9 @@ private extension UserDefaults {
     private static let recognitionCandidatesKey = "recognitionCandidates"
     private static let audioInputModeKey = "audioInputMode"
     private static let microphoneDeviceUIDKey = "microphoneDeviceUID"
+    private static let silenceAutoStopMinutesKey = "silenceAutoStopMinutes"
+    /// 会議の後に止め忘れた記録を想定した既定。会議の途中の沈黙（資料を読む間や休憩）では止まらない長さにする
+    private static let defaultSilenceAutoStopMinutes = 30
 
     private let defaults: UserDefaults
 }

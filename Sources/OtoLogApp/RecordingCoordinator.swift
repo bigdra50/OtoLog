@@ -47,13 +47,16 @@ import OtoLogCore
         let locales = recognitionLocales()
         let makeTranslator = translatorFactory()
         let feeds = makeFeeds()
+        let silenceTimeout = settings.silenceTimeout
         let startRequest = startRequestEntry(via: .popover)
         Task { [session, state, recordingLog] in
             if state.isRecording {
                 await session.stop()
             } else {
                 recordingLog.record(startRequest)
-                await session.start(feeds: feeds, locales: locales, makeTranslator: makeTranslator)
+                await session.start(
+                    feeds: feeds, locales: locales, makeTranslator: makeTranslator, silenceTimeout: silenceTimeout
+                )
             }
         }
     }
@@ -135,7 +138,8 @@ import OtoLogCore
         }
         recordingLog.record(startRequestEntry(via: .control))
         await session.start(
-            feeds: makeFeeds(), locales: recognitionLocales(), makeTranslator: translatorFactory()
+            feeds: makeFeeds(), locales: recognitionLocales(), makeTranslator: translatorFactory(),
+            silenceTimeout: settings.silenceTimeout
         )
         let after = await session.state
         if case let .failed(message) = after {
