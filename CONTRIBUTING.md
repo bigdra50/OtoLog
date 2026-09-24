@@ -44,6 +44,16 @@ swift run otolog-devtool ctl <status|start|stop>      # 起動中アプリの制
 - `OTOLOG_TRACE=1` でエンジン内部のトレースが stderr に出る
 - `OTOLOG_CLAUDE_DEBUG=1` で claude 呼び出しごとの診断ログを `$XDG_STATE_HOME/otolog/claude-logs/`（既定 `~/.local/state/...`）へ保存する。呼び出しタイムライン（`.log`: 引数・プロンプトサイズ・チャンク受信・終了/エラー）と claude CLI 内部ログ（`-cli.log`: API リクエスト・リトライ）の2ファイル1組。生成が進んでいるか・リトライで詰まっているかの切り分けに使う
   - GUI アプリで有効化する場合は `launchctl setenv OTOLOG_CLAUDE_DEBUG 1` してからアプリを再起動（戻すときは `unsetenv`）
+- 記録の経緯は設定なしで常に `$XDG_STATE_HOME/otolog/recording.log`（既定 `~/.local/state/...`）へ追記される。記録が止まった原因の切り分けに使う
+  - 1行に1件で、開始要求（経路・入力・認識ロケール）、状態遷移（failed は理由つき）、キャプチャの中断、保存と翻訳の失敗、完了したセッションのディレクトリ名を残す。発話の本文は書かない
+  - 同じ行を統合ログにも出す（`log show --last 1d --predicate 'subsystem == "com.bigdra50.OtoLog" AND category == "recording"'`）
+  - キャプチャの中断には、止まった音源と、再起動の回数（`restart 1`）か諦めたこと（`giving up`）が付く
+
+    ```text
+    2026-07-29T13:40:03.123+0900 [ERROR] capture interrupted: マイク (restart 1): 音声キャプチャデバイスが無効になりました（オーディオ構成の変更）。記録を再開してください。
+    2026-07-29T14:10:44.001+0900 [ERROR] capture interrupted: マイク (giving up): 音声キャプチャデバイスが無効になりました（オーディオ構成の変更）。記録を再開してください。
+    2026-07-29T14:10:44.012+0900 [ERROR] state: failed: マイク: 音声キャプチャデバイスが無効になりました（オーディオ構成の変更）。記録を再開してください。
+    ```
 
 ## プロジェクト構成
 

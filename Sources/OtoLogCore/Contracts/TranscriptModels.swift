@@ -5,6 +5,16 @@ import Foundation
 public enum AudioSourceKind: String, Sendable, Codable {
     case system
     case microphone
+
+    // MARK: Public
+
+    /// 失敗理由やログで、どの音源の話かを示す名前
+    public var displayName: String {
+        switch self {
+        case .system: "システム音声"
+        case .microphone: "マイク"
+        }
+    }
 }
 
 // MARK: - TranscriptEvent

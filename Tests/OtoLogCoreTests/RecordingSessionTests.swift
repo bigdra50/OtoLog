@@ -8,6 +8,15 @@ struct RecordingSessionTests {
 
     struct Boom: Error {}
 
+    /// 理由の文言まで検証するためのエラー。localizedDescription が message になる
+    struct Described: LocalizedError {
+        let message: String
+
+        var errorDescription: String? {
+            message
+        }
+    }
+
     @Test func startEmitsPreparingProgressThenRecording() async {
         let sut = makeSUT()
         sut.engine.progressScript = [0.5]
@@ -295,6 +304,122 @@ struct RecordingSessionTests {
             return false
         })
         #expect(await eventually { sut.feedDoubles[0].capture.stopCallCount == 1 })
+    }
+
+    /// 失敗で畳むときに止めた側のキャプチャの終了は中断ではない。再起動も中断の通知もしない
+    @Test func tearDownAfterFailureDoesNotRestartTheOtherFeed() async {
+        let sut = await makeStartedSUT(kinds: [.system, .microphone])
+        sut.feedDoubles[1].capture.fail(Described(message: "1回目"))
+        #expect(await eventually { sut.feedDoubles[1].capture.startCallCount == 2 })
+
+        sut.feedDoubles[1].capture.fail(Described(message: "2回目"))
+
+        #expect(await eventually { sut.feedDoubles[0].capture.stopCallCount == 1 })
+        #expect(await eventually { await sut.session.state == .failed("マイク: 2回目") })
+        #expect(sut.feedDoubles[0].capture.startCallCount == 1)
+        #expect(!sut.collector.events.contains {
+            if case let .captureInterrupted(interruption) = $0 { interruption.source == .system } else { false }
+        })
+    }
+
+    // MARK: 中断と失敗理由（どの音源か）
+
+    /// 再起動で続く中断も、どの音源がなぜ止まったかを流す。後から経緯を追えるようにするため
+    @Test func captureFailureReportsInterruptionWithFirstRestartAttempt() async {
+        let sut = await makeStartedSUT(kinds: [.system, .microphone])
+
+        sut.feedDoubles[1].capture.fail(Described(message: "デバイスが外れた"))
+
+        #expect(await eventually {
+            sut.collector.events.contains(.captureInterrupted(CaptureInterruption(
+                source: .microphone, reason: "デバイスが外れた", restartAttempt: 1
+            )))
+        })
+        #expect(await eventually { sut.feedDoubles[1].capture.startCallCount == 2 })
+        #expect(await sut.session.state == .recording)
+    }
+
+    /// 再起動を諦めるときは restartAttempt なしで流し、続く failed の理由には音源名を付ける
+    @Test func secondCaptureFailureReportsGiveUpAndNamesTheFeed() async throws {
+        let sut = await makeStartedSUT(kinds: [.system, .microphone])
+        sut.feedDoubles[1].capture.fail(Described(message: "1回目"))
+        #expect(await eventually { sut.feedDoubles[1].capture.startCallCount == 2 })
+
+        sut.feedDoubles[1].capture.fail(Described(message: "2回目"))
+
+        let failed = SessionEvent.stateChanged(.failed("マイク: 2回目"))
+        #expect(await eventually { sut.collector.events.contains(failed) })
+        let events = sut.collector.events
+        let giveUpIndex = try #require(events.firstIndex(of: .captureInterrupted(CaptureInterruption(
+            source: .microphone, reason: "2回目", restartAttempt: nil
+        ))))
+        let failedIndex = try #require(events.firstIndex(of: failed))
+        #expect(giveUpIndex < failedIndex)
+    }
+
+    /// 再起動そのものが失敗したら、その理由で諦めたことを流してから failed にする
+    @Test func failedRestartReportsGiveUpWithStartError() async {
+        let sut = await makeStartedSUT()
+        sut.capture.errorOnStart = Described(message: "起動できない")
+
+        sut.capture.fail(Described(message: "止まった"))
+
+        #expect(await eventually {
+            sut.collector.events.contains(.stateChanged(.failed("システム音声: 起動できない")))
+        })
+        #expect(sut.collector.events.contains(.captureInterrupted(CaptureInterruption(
+            source: .system, reason: "止まった", restartAttempt: 1
+        ))))
+        #expect(sut.collector.events.contains(.captureInterrupted(CaptureInterruption(
+            source: .system, reason: "起動できない", restartAttempt: nil
+        ))))
+    }
+
+    /// 停止に伴うキャプチャの終了は中断ではない
+    @Test func stopDoesNotReportCaptureInterruption() async {
+        let sut = await makeStartedSUT(kinds: [.system, .microphone])
+
+        await sut.session.stop()
+
+        #expect(await eventually { sut.collector.events.contains(.stateChanged(.idle)) })
+        #expect(!sut.collector.events.contains { if case .captureInterrupted = $0 { true } else { false } })
+    }
+
+    /// 認識エンジンの異常終了も、どの音源のエンジンかを理由に付ける
+    @Test func engineFailureNamesTheFeed() async {
+        let sut = await makeStartedSUT(kinds: [.system, .microphone])
+
+        sut.feedDoubles[0].engine.failEvents(Described(message: "認識が止まった"))
+
+        #expect(await eventually { await sut.session.state == .failed("システム音声: 認識が止まった") })
+    }
+
+    @Test func prepareFailureNamesTheFeed() async {
+        let sut = makeSUT(kinds: [.system, .microphone])
+        sut.feedDoubles[1].engine.prepareError = Described(message: "モデルが無い")
+
+        await sut.session.start(feeds: sut.feeds, locales: [ja])
+
+        #expect(await sut.session.state == .failed("マイク: モデルが無い"))
+    }
+
+    @Test func captureStartFailureNamesTheFeed() async {
+        let sut = makeSUT(kinds: [.system, .microphone])
+        sut.feedDoubles[1].capture.errorOnStart = Described(message: "許可が無い")
+
+        await sut.session.start(feeds: sut.feeds, locales: [ja])
+
+        #expect(await sut.session.state == .failed("マイク: 許可が無い"))
+    }
+
+    /// 保存先の確保は音源に依らないため、音源名を付けない
+    @Test func storeBeginFailureIsNotAttributedToAFeed() async {
+        let sut = makeSUT(kinds: [.system, .microphone])
+        await sut.store.setBeginError(Described(message: "保存先に書けない"))
+
+        await sut.session.start(feeds: sut.feeds, locales: [ja])
+
+        #expect(await sut.session.state == .failed("保存先に書けない"))
     }
 
     // MARK: 翻訳
