@@ -60,6 +60,19 @@ struct ControlServerTests {
         #expect(response.ok)
     }
 
+    /// 自分が bind したソケットファイルは stop で片付ける
+    @Test func stopRemovesOwnSocketFile() async throws {
+        let socketPath = temporarySocketPath()
+        defer { try? FileManager.default.removeItem(atPath: socketPath) }
+        let server = ControlServer(socketPath: socketPath) { _ in ControlResponse(ok: true, state: "own") }
+        try server.start()
+        try #require(await eventuallyServes("own", at: socketPath))
+
+        server.stop()
+
+        #expect(!FileManager.default.fileExists(atPath: socketPath))
+    }
+
     /// 接続先が無い（アプリ未起動）は分かるエラーで即失敗する
     @Test func failsFastWhenServerAbsent() async {
         await #expect(throws: ControlClientError.self) {
@@ -76,6 +89,17 @@ struct ControlServerTests {
     /// unix socket のパス長上限（104 バイト）を超えないよう短い一時パスを使う
     private func temporarySocketPath() -> String {
         "/tmp/otolog-test-\(UUID().uuidString.prefix(8)).sock"
+    }
+
+    /// 指定の state を返すサーバーへ接続できるまで待つ。
+    /// 応答が返った時点で .ready の処理も済んでいる（.ready の通知は最初の接続より先にサーバーのキューへ届く）
+    private func eventuallyServes(_ state: String, at socketPath: String) async -> Bool {
+        await eventually {
+            let response = try? await ControlClient.send(
+                ControlRequest(command: .status), socketPath: socketPath, timeout: .seconds(1)
+            )
+            return response?.state == state
+        }
     }
 
     private func withServer(
