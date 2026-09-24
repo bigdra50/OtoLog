@@ -39,8 +39,11 @@ struct RecordingLog {
         }
 
         /// 経緯に関わるイベントだけを行にする。ライブ字幕と確定セグメントは利用者の発話そのもので量も多く、
-        /// 準備の進捗は細かく流れるだけで経緯の手がかりにならないため nil を返す
-        init?(event: SessionEvent) {
+        /// 準備の進捗は細かく流れるだけで経緯の手がかりにならないため nil を返す。
+        ///
+        /// saveDirectory は閉じたセッションの行に使う保存先。保存先は設定で変えられるため、
+        /// ディレクトリ名だけでは後からどのフォルダの記録か分からない。保存先と合わせた絶対パスで残す
+        init?(event: SessionEvent, saveDirectory: URL) {
             switch event {
             case .stateChanged(.idle):
                 self.init(level: .info, message: "state: idle")
@@ -65,7 +68,8 @@ struct RecordingLog {
             case let .autoStopped(silence):
                 self.init(level: .info, message: "auto-stopped: silence for \(Self.describe(silence))")
             case let .sessionFinished(ref):
-                self.init(level: .info, message: "session finished: \(ref.directoryName)")
+                let path = saveDirectory.appendingPathComponent(ref.directoryName).path
+                self.init(level: .info, message: "session finished: \(path)")
             case .preparationProgress, .liveTranscript, .segmentRecorded:
                 return nil
             }

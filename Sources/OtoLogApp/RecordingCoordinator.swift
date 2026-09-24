@@ -237,7 +237,7 @@ import OtoLogCore
     }
 
     private func apply(_ event: SessionEvent) {
-        if let entry = RecordingLog.Entry(event: event) {
+        if let entry = RecordingLog.Entry(event: event, saveDirectory: settings.saveDirectory) {
             recordingLog.record(entry)
         }
         switch event {
