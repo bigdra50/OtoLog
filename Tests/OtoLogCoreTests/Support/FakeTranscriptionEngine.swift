@@ -12,6 +12,9 @@ final class FakeTranscriptionEngine: TranscriptionEngine, @unchecked Sendable {
     var progressScript: [Double] = []
     /// 呼び出し順の検証用フック
     var onFinish: (@Sendable () -> Void)?
+    /// finish でイベント列を閉じる前に流すイベント。
+    /// 実エンジンが言語の判定待ちで持っていたセグメントを finish で吐き出すのを再現する
+    var eventsOnFinish: [TranscriptEvent] = []
 
     var prepareCallCount: Int {
         lock.withLock { _prepareCallCount }
@@ -69,6 +72,9 @@ final class FakeTranscriptionEngine: TranscriptionEngine, @unchecked Sendable {
     func finish() async {
         lock.withLock { _finishCallCount += 1 }
         onFinish?()
+        for event in eventsOnFinish {
+            currentEventContinuation?.yield(event)
+        }
         currentEventContinuation?.finish()
     }
 

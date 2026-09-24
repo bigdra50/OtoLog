@@ -20,6 +20,7 @@ actor SpyStore: TranscriptStore {
 
     /// 呼び出し順の検証用フック
     var onFinalize: (@Sendable () -> Void)?
+    var onAppend: (@Sendable () -> Void)?
 
     func begin(context: TranscriptionContext) throws {
         if let beginError { throw beginError }
@@ -29,6 +30,7 @@ actor SpyStore: TranscriptStore {
     func append(_ segment: TranscriptSegment) throws {
         if let errorToThrow { throw errorToThrow }
         segments.append(segment)
+        onAppend?()
     }
 
     func finalize(endedAt: Date, reason: SessionEndReason) throws -> SessionRef? {
@@ -48,6 +50,10 @@ actor SpyStore: TranscriptStore {
 
     func setOnFinalize(_ hook: (@Sendable () -> Void)?) {
         onFinalize = hook
+    }
+
+    func setOnAppend(_ hook: (@Sendable () -> Void)?) {
+        onAppend = hook
     }
 
     func setFinalizeResult(_ ref: SessionRef?) {
