@@ -35,6 +35,7 @@ swift run otolog-devtool ctl <status|start|stop>      # 起動中アプリの制
 `ctl` は起動中のアプリを Unix ドメインソケット（`$XDG_STATE_HOME/otolog/control.sock`、0600 で自ユーザーのみ）経由で操作する。
 応答は JSON 1行（`{"ok":true,"state":"recording","sessionPath":"..."}`）で、`ok: false` は exit 1、アプリ未起動は exit 69。
 エージェントや自動化から UI 操作（AX）なしで記録の開始・停止・状態確認ができる。
+`ctl start` で始めた記録にも、ポップオーバーから始めた記録と同じく設定の「無音で自動停止」が適用される。
 初回の「システム音声の録音」許可ダイアログだけは人の操作が必要。
 
 旧フラット構造は移行しなくても読み取り互換で表示される。
