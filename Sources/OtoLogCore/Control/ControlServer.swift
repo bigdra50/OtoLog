@@ -28,12 +28,10 @@ public final class ControlServer: @unchecked Sendable {
         listener.newConnectionHandler = { [weak self] connection in
             self?.handle(connection)
         }
-        // bind は start 後に非同期で行われるため、ソケットファイルができた .ready 時点で絞る
-        listener.stateUpdateHandler = { [socketPath] state in
+        // bind は start 後に非同期で行われるため、ソケットファイルができた .ready 時点で権限を絞り、同一性を控える
+        listener.stateUpdateHandler = { [weak self] state in
             if case .ready = state {
-                try? FileManager.default.setAttributes(
-                    [.posixPermissions: 0o600], ofItemAtPath: socketPath
-                )
+                self?.claimSocketFile()
             }
         }
         listener.start(queue: queue)
@@ -43,10 +41,37 @@ public final class ControlServer: @unchecked Sendable {
     public func stop() {
         listener?.cancel()
         listener = nil
-        try? FileManager.default.removeItem(atPath: socketPath)
+        // 再起動では新しいインスタンスが同じパスへ bind し直した後にこちらが止まる。
+        // パスだけで消すと新しい方のソケットを消してしまうため、自分が bind したファイルのときだけ消す。
+        // bind を確認する前に止まった場合は残す（残骸なら次の start が消す）
+        let boundSocket = lock.withLock {
+            let bound = self.boundSocket
+            self.boundSocket = nil
+            return bound
+        }
+        if let boundSocket, FileIdentity(path: socketPath) == boundSocket {
+            try? FileManager.default.removeItem(atPath: socketPath)
+        }
     }
 
     // MARK: Private
+
+    /// デバイス番号と inode 番号の組。同じパスに作り直されたファイルを別物として見分ける
+    private struct FileIdentity: Equatable {
+        // MARK: Lifecycle
+
+        init?(path: String) {
+            var info = stat()
+            guard lstat(path, &info) == 0 else { return nil }
+            device = info.st_dev
+            inode = info.st_ino
+        }
+
+        // MARK: Internal
+
+        let device: dev_t
+        let inode: ino_t
+    }
 
     /// 制御コマンドは小さい JSON のみ。これを超える入力は不正として切断する
     private static let maxRequestBytes = 64 * 1024
@@ -55,6 +80,16 @@ public final class ControlServer: @unchecked Sendable {
     private let handler: Handler
     private let queue = DispatchQueue(label: "com.bigdra50.OtoLog.ControlServer")
     private var listener: NWListener?
+    /// .ready（サーバーキュー）と stop（メインスレッド）の競合から boundSocket を守る
+    private let lock = NSLock()
+    /// .ready で控えた自分のソケットファイル。nil なら stop は何も消さない
+    private var boundSocket: FileIdentity?
+
+    private func claimSocketFile() {
+        try? FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: socketPath)
+        let identity = FileIdentity(path: socketPath)
+        lock.withLock { boundSocket = identity }
+    }
 
     private func handle(_ connection: NWConnection) {
         connection.start(queue: queue)
