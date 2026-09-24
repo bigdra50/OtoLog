@@ -43,6 +43,53 @@ import OtoLogCore
         }
     }
 
+    /// startObserving が届いた順に呼ぶ。テストが記録を動かさずにイベントを渡して確かめられるよう、private にしない
+    func apply(_ event: SessionEvent) {
+        if let entry = RecordingLog.Entry(event: event, saveDirectory: settings.saveDirectory) {
+            recordingLog.record(entry)
+        }
+        switch event {
+        case let .stateChanged(sessionState):
+            state.sessionState = sessionState
+            if sessionState == .preparing {
+                state.autoStopNotice = nil
+            }
+            if sessionState == .recording {
+                state.storeErrorMessage = nil
+                state.translationErrorMessage = nil
+            }
+            if sessionState == .idle {
+                state.liveText = ""
+            }
+            if sessionState != .recording {
+                overlay.hide()
+            }
+        case let .preparationProgress(progress):
+            state.preparationProgress = progress
+        case let .liveTranscript(text):
+            state.liveText = text
+        case let .segmentRecorded(segment):
+            state.lastSegmentText = segment.text
+            state.lastSegmentTranslation = segment.translation ?? ""
+            state.liveText = ""
+            if let translation = segment.translation, settings.subtitleOverlayEnabled {
+                overlay.update(original: segment.text, translation: translation)
+            }
+        case let .storeError(message):
+            state.storeErrorMessage = message
+        case let .translationError(message):
+            state.translationErrorMessage = message
+        case let .autoStopped(silence):
+            state.autoStopNotice = AutoStopNotice.message(silence: silence, stoppedAt: Date())
+        case .captureInterrupted:
+            // ポップオーバーには出さない。再起動で続くなら記録に支障はなく、
+            // 諦めたときは続く failed の状態遷移が音源名つきの理由を表示する
+            break
+        case let .sessionFinished(ref):
+            onSessionFinished?(ref)
+        }
+    }
+
     func toggle() {
         let locales = recognitionLocales()
         let makeTranslator = translatorFactory()
@@ -233,52 +280,6 @@ import OtoLogCore
         return await OffMainIO.read(priority: .utility) {
             TranscriptReader(directory: directory, timeZone: .current)
                 .availableSessions().first?.directoryName
-        }
-    }
-
-    private func apply(_ event: SessionEvent) {
-        if let entry = RecordingLog.Entry(event: event, saveDirectory: settings.saveDirectory) {
-            recordingLog.record(entry)
-        }
-        switch event {
-        case let .stateChanged(sessionState):
-            state.sessionState = sessionState
-            if sessionState == .preparing {
-                state.autoStopNotice = nil
-            }
-            if sessionState == .recording {
-                state.storeErrorMessage = nil
-                state.translationErrorMessage = nil
-            }
-            if sessionState == .idle {
-                state.liveText = ""
-            }
-            if sessionState != .recording {
-                overlay.hide()
-            }
-        case let .preparationProgress(progress):
-            state.preparationProgress = progress
-        case let .liveTranscript(text):
-            state.liveText = text
-        case let .segmentRecorded(segment):
-            state.lastSegmentText = segment.text
-            state.lastSegmentTranslation = segment.translation ?? ""
-            state.liveText = ""
-            if let translation = segment.translation, settings.subtitleOverlayEnabled {
-                overlay.update(original: segment.text, translation: translation)
-            }
-        case let .storeError(message):
-            state.storeErrorMessage = message
-        case let .translationError(message):
-            state.translationErrorMessage = message
-        case let .autoStopped(silence):
-            state.autoStopNotice = AutoStopNotice.message(silence: silence, stoppedAt: Date())
-        case .captureInterrupted:
-            // ポップオーバーには出さない。再起動で続くなら記録に支障はなく、
-            // 諦めたときは続く failed の状態遷移が音源名つきの理由を表示する
-            break
-        case let .sessionFinished(ref):
-            onSessionFinished?(ref)
         }
     }
 }
