@@ -6,13 +6,15 @@ import OtoLogCore
 @MainActor final class RecordingCoordinator {
     // MARK: Lifecycle
 
+    /// makeFeeds は記録を始めるたびに呼ぶフィードの組み立て。テストは実デバイスと SpeechAnalyzer の代わりを渡す
     init(
         session: RecordingSession,
         store: SessionFileStore,
         state: AppState,
         settings: AppSettings,
         overlay: SubtitleOverlayController = SubtitleOverlayController(),
-        recordingLog: RecordingLog = RecordingLog()
+        recordingLog: RecordingLog = RecordingLog(),
+        makeFeeds: @escaping @MainActor (AppSettings) -> [RecordingFeed] = RecordingCoordinator.deviceFeeds(for:)
     ) {
         self.session = session
         self.store = store
@@ -20,6 +22,7 @@ import OtoLogCore
         self.settings = settings
         self.overlay = overlay
         self.recordingLog = recordingLog
+        self.makeFeeds = makeFeeds
     }
 
     // MARK: Internal
@@ -43,17 +46,67 @@ import OtoLogCore
         }
     }
 
+    /// startObserving が届いた順に呼ぶ。テストが記録を動かさずにイベントを渡して確かめられるよう、private にしない
+    func apply(_ event: SessionEvent) {
+        if let entry = RecordingLog.Entry(event: event, saveDirectory: settings.saveDirectory) {
+            recordingLog.record(entry)
+        }
+        switch event {
+        case let .stateChanged(sessionState):
+            state.sessionState = sessionState
+            if sessionState == .preparing {
+                state.autoStopNotice = nil
+            }
+            if sessionState == .recording {
+                state.storeErrorMessage = nil
+                state.translationErrorMessage = nil
+            }
+            if sessionState == .idle {
+                state.liveText = ""
+            }
+            if sessionState != .recording {
+                overlay.hide()
+            }
+        case let .preparationProgress(progress):
+            state.preparationProgress = progress
+        case let .liveTranscript(text):
+            state.liveText = text
+        case let .segmentRecorded(segment):
+            state.lastSegmentText = segment.text
+            state.lastSegmentTranslation = segment.translation ?? ""
+            state.liveText = ""
+            if let translation = segment.translation, settings.subtitleOverlayEnabled {
+                overlay.update(original: segment.text, translation: translation)
+            }
+        case let .storeError(message):
+            state.storeErrorMessage = message
+        case let .translationError(message):
+            state.translationErrorMessage = message
+        case let .autoStopped(silence):
+            state.autoStopNotice = AutoStopNotice.message(silence: silence, stoppedAt: Date())
+        case .captureInterrupted:
+            // ポップオーバーには出さない。再起動で続くなら記録に支障はなく、
+            // 諦めたときは続く failed の状態遷移が音源名つきの理由を表示する
+            break
+        case let .sessionFinished(ref):
+            onSessionFinished?(ref)
+        }
+    }
+
     func toggle() {
         let locales = recognitionLocales()
         let makeTranslator = translatorFactory()
-        let feeds = makeFeeds()
+        let feeds = makeFeeds(settings)
+        let silenceTimeout = settings.silenceTimeout
         let startRequest = startRequestEntry(via: .popover)
         Task { [session, state, recordingLog] in
             if state.isRecording {
                 await session.stop()
             } else {
                 recordingLog.record(startRequest)
-                await session.start(feeds: feeds, locales: locales, makeTranslator: makeTranslator)
+                await session.start(
+                    feeds: feeds, locales: locales, makeTranslator: makeTranslator, silenceTimeout: silenceTimeout
+                )
             }
         }
     }
@@ -135,7 +188,8 @@ import OtoLogCore
         }
         recordingLog.record(startRequestEntry(via: .control))
         await session.start(
-            feeds: makeFeeds(), locales: recognitionLocales(), makeTranslator: translatorFactory()
+            feeds: makeFeeds(settings), locales: recognitionLocales(), makeTranslator: translatorFactory(),
+            silenceTimeout: settings.silenceTimeout
         )
         let after = await session.state
         if case let .failed(message) = after {
@@ -168,6 +222,7 @@ import OtoLogCore
     private let settings: AppSettings
     private let overlay: SubtitleOverlayController
     private let recordingLog: RecordingLog
+    private let makeFeeds: @MainActor (AppSettings) -> [RecordingFeed]
     private var eventTask: Task<Void, Never>?
 
     private static func describe(_ state: SessionState) -> String {
@@ -185,19 +240,9 @@ import OtoLogCore
         return false
     }
 
-    private func recognitionLocales() -> [Locale] {
-        settings.resolvedRecognitionLocales.map { Locale(identifier: $0) }
-    }
-
-    private func startRequestEntry(via origin: RecordingLog.StartOrigin) -> RecordingLog.Entry {
-        .startRequested(
-            via: origin, inputMode: settings.audioInputMode, locales: settings.resolvedRecognitionLocales
-        )
-    }
-
     /// 設定の入力モードからフィード（キャプチャ + エンジンの対）を組む。
     /// キャプチャとエンジンは開始のたびに新規生成し、前回セッションの状態を持ち越さない
-    private func makeFeeds() -> [RecordingFeed] {
+    private static func deviceFeeds(for settings: AppSettings) -> [RecordingFeed] {
         let mode = settings.audioInputMode
         var feeds: [RecordingFeed] = []
         if mode != .microphoneOnly {
@@ -215,6 +260,16 @@ import OtoLogCore
         return feeds
     }
 
+    private func recognitionLocales() -> [Locale] {
+        settings.resolvedRecognitionLocales.map { Locale(identifier: $0) }
+    }
+
+    private func startRequestEntry(via origin: RecordingLog.StartOrigin) -> RecordingLog.Entry {
+        .startRequested(
+            via: origin, inputMode: settings.audioInputMode, locales: settings.resolvedRecognitionLocales
+        )
+    }
+
     /// 翻訳器はセグメントのロケールが決まってから作る。自動検出では開始時点で翻訳元が分からない。
     /// 翻訳オフ、または翻訳先が認識言語と同じときは nil になり、訳さずに記録される
     private func translatorFactory() -> (@Sendable (String) -> (any Translator)?)? {
@@ -229,47 +284,6 @@ import OtoLogCore
         return await OffMainIO.read(priority: .utility) {
             TranscriptReader(directory: directory, timeZone: .current)
                 .availableSessions().first?.directoryName
-        }
-    }
-
-    private func apply(_ event: SessionEvent) {
-        if let entry = RecordingLog.Entry(event: event) {
-            recordingLog.record(entry)
-        }
-        switch event {
-        case let .stateChanged(sessionState):
-            state.sessionState = sessionState
-            if sessionState == .recording {
-                state.storeErrorMessage = nil
-                state.translationErrorMessage = nil
-            }
-            if sessionState == .idle {
-                state.liveText = ""
-            }
-            if sessionState != .recording {
-                overlay.hide()
-            }
-        case let .preparationProgress(progress):
-            state.preparationProgress = progress
-        case let .liveTranscript(text):
-            state.liveText = text
-        case let .segmentRecorded(segment):
-            state.lastSegmentText = segment.text
-            state.lastSegmentTranslation = segment.translation ?? ""
-            state.liveText = ""
-            if let translation = segment.translation, settings.subtitleOverlayEnabled {
-                overlay.update(original: segment.text, translation: translation)
-            }
-        case let .storeError(message):
-            state.storeErrorMessage = message
-        case let .translationError(message):
-            state.translationErrorMessage = message
-        case .captureInterrupted:
-            // ポップオーバーには出さない。再起動で続くなら記録に支障はなく、
-            // 諦めたときは続く failed の状態遷移が音源名つきの理由を表示する
-            break
-        case let .sessionFinished(ref):
-            onSessionFinished?(ref)
         }
     }
 }

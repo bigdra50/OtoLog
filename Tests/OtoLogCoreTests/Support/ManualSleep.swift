@@ -1,7 +1,7 @@
 import Foundation
 
-/// RecordingSession へ注入する sleep。待ち時間を記録し、hold 中は release されるまで戻らない。
-/// 再起動前の待ちの最中に起きることを、実時間を待たずに再現する
+/// RecordingSession へ注入する sleep。待ち時間を記録し、hold 中は step か release されるまで戻らない。
+/// 再起動前の待ちや無音の見張りの待ちの最中に起きることを、実時間を待たずに再現する
 final class ManualSleep: @unchecked Sendable {
     // MARK: Lifecycle
 
@@ -42,6 +42,18 @@ final class ManualSleep: @unchecked Sendable {
             }
         }
         lock.withLock { returned += 1 }
+    }
+
+    /// 待っている呼び出しだけを戻し、以降の呼び出しは引き続き待たせる。
+    /// 周期的に待つ処理（無音の見張り）を1周ずつ進めるのに使う。release では以降の待ちが即座に戻り、見張りが空回りする
+    func step() {
+        let pending = lock.withLock {
+            defer { waiters.removeAll() }
+            return waiters
+        }
+        for waiter in pending {
+            waiter.resume()
+        }
     }
 
     /// 待っている呼び出しをすべて戻し、以降の呼び出しは待たせない

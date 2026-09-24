@@ -81,6 +81,25 @@ struct TranscriptReaderTests {
         }
     }
 
+    /// 停止後の自動処理は、発話（文字か数字を含む文字起こし）が1件も無い記録には走らせない。
+    /// 何も保存していない記録にはファイルが無く、雑音に対しては句読点だけの結果が保存される
+    @Test func hasSpeechNeedsASegmentWithALetterOrDigit() throws {
+        try withTempDir { dir in
+            let ref = try makeSession(in: dir, name: "2026-07-29_1300", title: nil, startedAt: 1_785_297_600)
+            let reader = TranscriptReader(directory: dir, timeZone: jst)
+            #expect(!reader.hasSpeech(in: ref))
+
+            let transcript = dir.appendingPathComponent("2026-07-29_1300/transcript.jsonl")
+            let noise = try JSONLCoder.encodeLine(TestFixtures.segment(text: ", , ,")) + "\n"
+            try noise.write(to: transcript, atomically: true, encoding: .utf8)
+            #expect(!reader.hasSpeech(in: ref))
+
+            let speech = try JSONLCoder.encodeLine(TestFixtures.segment(text: "本文")) + "\n"
+            try (noise + speech).write(to: transcript, atomically: true, encoding: .utf8)
+            #expect(reader.hasSpeech(in: ref))
+        }
+    }
+
     @Test func segmentsThrowsWhenTranscriptMissing() throws {
         try withTempDir { dir in
             let ref = try makeSession(in: dir, name: "2026-07-29_1300", title: nil, startedAt: 1_785_297_600)

@@ -32,25 +32,27 @@ struct RecordingLogTests {
     }
 
     @Test func 状態遷移を残す() {
-        #expect(RecordingLog.Entry(event: .stateChanged(.preparing))
+        #expect(RecordingLog.Entry(event: .stateChanged(.preparing), saveDirectory: saveDirectory)
             == RecordingLog.Entry(level: .info, message: "state: preparing"))
-        #expect(RecordingLog.Entry(event: .stateChanged(.recording))
+        #expect(RecordingLog.Entry(event: .stateChanged(.recording), saveDirectory: saveDirectory)
             == RecordingLog.Entry(level: .info, message: "state: recording"))
-        #expect(RecordingLog.Entry(event: .stateChanged(.stopping))
+        #expect(RecordingLog.Entry(event: .stateChanged(.stopping), saveDirectory: saveDirectory)
             == RecordingLog.Entry(level: .info, message: "state: stopping"))
-        #expect(RecordingLog.Entry(event: .stateChanged(.idle))
+        #expect(RecordingLog.Entry(event: .stateChanged(.idle), saveDirectory: saveDirectory)
             == RecordingLog.Entry(level: .info, message: "state: idle"))
     }
 
     @Test func 失敗は理由つきのエラーとして残す() {
-        let entry = RecordingLog.Entry(event: .stateChanged(.failed("マイク: デバイスが無効になりました")))
+        let entry = RecordingLog.Entry(
+            event: .stateChanged(.failed("マイク: デバイスが無効になりました")), saveDirectory: saveDirectory
+        )
         #expect(entry == RecordingLog.Entry(level: .error, message: "state: failed: マイク: デバイスが無効になりました"))
     }
 
     @Test func 再起動するキャプチャ中断は音源と試行回数と理由を残す() {
         let entry = RecordingLog.Entry(event: .captureInterrupted(CaptureInterruption(
             source: .microphone, reason: "デバイスが無効になりました", restartAttempt: 1
-        )))
+        )), saveDirectory: saveDirectory)
         #expect(entry == RecordingLog.Entry(
             level: .error, message: "capture interrupted: マイク (restart 1): デバイスが無効になりました"
         ))
@@ -59,23 +61,36 @@ struct RecordingLogTests {
     @Test func 再起動を諦めた中断はそれと分かるように残す() {
         let entry = RecordingLog.Entry(event: .captureInterrupted(CaptureInterruption(
             source: .system, reason: "capture stream ended unexpectedly", restartAttempt: nil
-        )))
+        )), saveDirectory: saveDirectory)
         #expect(entry == RecordingLog.Entry(
             level: .error, message: "capture interrupted: システム音声 (giving up): capture stream ended unexpectedly"
         ))
     }
 
     @Test func 保存と翻訳の失敗を残す() {
-        #expect(RecordingLog.Entry(event: .storeError("書き込めません"))
+        #expect(RecordingLog.Entry(event: .storeError("書き込めません"), saveDirectory: saveDirectory)
             == RecordingLog.Entry(level: .error, message: "store error: 書き込めません"))
-        #expect(RecordingLog.Entry(event: .translationError("訳せません"))
+        #expect(RecordingLog.Entry(event: .translationError("訳せません"), saveDirectory: saveDirectory)
             == RecordingLog.Entry(level: .error, message: "translation error: 訳せません"))
     }
 
-    @Test func 完了したセッションはディレクトリ名を残す() {
-        let ref = SessionRef(directoryName: "2026-09-16/1032", title: nil, startedAt: fixedDate)
-        #expect(RecordingLog.Entry(event: .sessionFinished(ref))
-            == RecordingLog.Entry(level: .info, message: "session finished: 2026-09-16/1032"))
+    /// 止めたのが利用者ではなく無音の見張りだったことと、何分の無音で止めたかを残す
+    @Test func 無音での自動停止は無音の長さを残す() {
+        #expect(RecordingLog.Entry(event: .autoStopped(silence: .seconds(30 * 60)), saveDirectory: saveDirectory)
+            == RecordingLog.Entry(level: .info, message: "auto-stopped: silence for 30m"))
+    }
+
+    @Test func 分で割り切れない無音の長さは秒で残す() {
+        #expect(RecordingLog.Entry(event: .autoStopped(silence: .seconds(90)), saveDirectory: saveDirectory)
+            == RecordingLog.Entry(level: .info, message: "auto-stopped: silence for 90s"))
+    }
+
+    /// 保存先は設定で変えられるため、ディレクトリ名だけではどのフォルダの記録か分からない。保存先を含む絶対パスで残す
+    @Test func 完了したセッションは保存先を含む絶対パスで残す() {
+        let ref = SessionRef(directoryName: "2026-09-16/週次定例", title: "週次定例", startedAt: fixedDate)
+        #expect(RecordingLog.Entry(event: .sessionFinished(ref), saveDirectory: saveDirectory) == RecordingLog.Entry(
+            level: .info, message: "session finished: /Users/you/Documents/OtoLog/2026-09-16/週次定例"
+        ))
     }
 
     /// 発話の本文は利用者の会話そのもので量も多い。準備の進捗は細かく流れるだけで経緯の手がかりにならない
@@ -84,9 +99,9 @@ struct RecordingLogTests {
             text: "確定した発話", audioStart: nil, audioEnd: nil, finalizedAt: fixedDate,
             locale: "ja-JP", source: .microphone, sessionID: UUID(), sessionStartedAt: fixedDate
         )
-        #expect(RecordingLog.Entry(event: .liveTranscript("ライブの発話")) == nil)
-        #expect(RecordingLog.Entry(event: .segmentRecorded(segment)) == nil)
-        #expect(RecordingLog.Entry(event: .preparationProgress(0.5)) == nil)
+        #expect(RecordingLog.Entry(event: .liveTranscript("ライブの発話"), saveDirectory: saveDirectory) == nil)
+        #expect(RecordingLog.Entry(event: .segmentRecorded(segment), saveDirectory: saveDirectory) == nil)
+        #expect(RecordingLog.Entry(event: .preparationProgress(0.5), saveDirectory: saveDirectory) == nil)
     }
 
     // MARK: 書き込み
@@ -129,6 +144,8 @@ struct RecordingLogTests {
     // MARK: Private
 
     private let fixedDate = Date(timeIntervalSince1970: 1_789_000_000)
+    /// 閉じたセッションの行が絶対パスを組み立てる保存先
+    private let saveDirectory = URL(fileURLWithPath: "/Users/you/Documents/OtoLog", isDirectory: true)
 
     private func makeTempRoot() -> URL {
         URL(fileURLWithPath: NSTemporaryDirectory())

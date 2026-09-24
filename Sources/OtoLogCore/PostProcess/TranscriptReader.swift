@@ -69,6 +69,12 @@ public struct TranscriptReader: Sendable {
             .filter { $0.hasSuffix(".md") && $0 != "transcript.md" }
     }
 
+    /// 発話を1件以上保存した記録か。発話とみなす基準は無音の判定（SilenceMonitor.isActivity）と同じ。
+    /// ファイルの有無では見分けない。雑音に対して認識器が返す句読点だけの結果（", , ,"）も保存されるため
+    public func hasSpeech(in ref: SessionRef) -> Bool {
+        ((try? segments(in: ref)) ?? []).contains { SilenceMonitor.isActivity($0.text) }
+    }
+
     /// 壊れ行（クラッシュ時の途中行や録音中の追記競合）はスキップして読めたセグメントを返す
     public func segments(in ref: SessionRef) throws -> [TranscriptSegment] {
         let url = directory.appendingPathComponent(ref.directoryName).appendingPathComponent("transcript.jsonl")

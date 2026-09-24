@@ -95,6 +95,23 @@ struct TestDoubleTests {
         #expect(sleep.requestedDurations == [.seconds(1), .milliseconds(5)])
     }
 
+    /// step は待っている呼び出しだけを戻す。release と違い、以降の呼び出しは引き続き待たせる
+    @Test func manualSleepStepReturnsOnlyTheWaitingCallers() async {
+        let sleep = ManualSleep(holding: true)
+        let first = Task { await sleep.sleep(for: .seconds(1)) }
+        #expect(await eventually { sleep.waitingCount == 1 })
+
+        sleep.step()
+        await first.value
+        let second = Task { await sleep.sleep(for: .seconds(2)) }
+
+        #expect(await eventually { sleep.waitingCount == 1 })
+        #expect(sleep.returnedCount == 1)
+        sleep.release()
+        await second.value
+        #expect(sleep.requestedDurations == [.seconds(1), .seconds(2)])
+    }
+
     @Test func spyStoreRecordsAndCanThrow() async throws {
         struct DiskFull: Error {}
         let store = SpyStore()
@@ -185,6 +202,34 @@ struct TestDoubleTests {
             received.append(event)
         }
         #expect(received == [.finalized(pending)])
+        await source.stop()
+    }
+
+    /// 取り消されたタスクで finish すると、eventsOnFinish を流さずにイベント列を閉じる。
+    /// 実エンジンで SpeechAnalyzer の finalize が CancellationError で抜け、確定させるはずだった結果が届かないのと同じ
+    @Test func fakeEngineDropsEventsOnFinishWhenFinishedOnACancelledTask() async throws {
+        let engine = FakeTranscriptionEngine()
+        engine.eventsOnFinish = [.finalized(TestFixtures.segment(text: "finalize で確定した発話"))]
+        let source = FakeCaptureSource()
+        let chunks = try await source.start(targetFormat: format)
+        let context = TranscriptionContext(
+            locale: "ja-JP", source: .system,
+            sessionID: UUID(), sessionStartedAt: Date()
+        )
+        let events = try await engine.start(chunks: chunks, context: context)
+
+        let finishing = Task {
+            withUnsafeCurrentTask { $0?.cancel() }
+            await engine.finish()
+        }
+        await finishing.value
+
+        var received: [TranscriptEvent] = []
+        for try await event in events {
+            received.append(event)
+        }
+        #expect(received.isEmpty)
+        #expect(engine.finishCallCount == 1)
         await source.stop()
     }
 }

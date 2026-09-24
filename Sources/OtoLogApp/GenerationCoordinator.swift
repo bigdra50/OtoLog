@@ -85,13 +85,25 @@ import OtoLogCore
         }
     }
 
-    /// 記録停止時のフック。一覧を更新し、設定に応じて自動処理を連鎖する。
-    /// タイトル生成が失敗した場合はパイプラインへ連鎖しない（手動で対処する）
+    /// 記録停止時のフック。一覧を更新し、設定に応じて自動処理を連鎖する
     func handleSessionFinished(_ ref: SessionRef) {
         Task { [weak self] in
             await self?.refresh()
         }
-        switch settings.postStopAction {
+        Task { [weak self] in
+            await self?.runPostStopAction(for: ref)
+        }
+    }
+
+    /// 停止時の自動処理。タイトル生成が失敗した場合はパイプラインへ連鎖しない（手動で対処する）。
+    /// 発話の無い記録には走らせない。タイトル生成が必ず失敗し、無音のまま自動停止した記録などでは、その失敗だけが表示に残るため。
+    /// テストが停止イベントを経ずに呼んで確かめられるよう、private にしない
+    func runPostStopAction(for ref: SessionRef) async {
+        let action = settings.postStopAction
+        guard action != .none else { return }
+        let reader = TranscriptReader(directory: settings.saveDirectory, timeZone: .current)
+        guard await OffMainIO.read({ reader.hasSpeech(in: ref) }) else { return }
+        switch action {
         case .none:
             break
         case .title:

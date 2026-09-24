@@ -5,7 +5,7 @@ import OtoLogCore
 /// 記録の経緯を後から追えるようにする記録。
 ///
 /// 記録の失敗はポップオーバーにしか出ず、アプリを再起動すると消える。
-/// どの音源がいつ・なぜ止まったかを残すため、開始要求・状態遷移・キャプチャの中断・
+/// どの音源がいつ・なぜ止まったかを残すため、開始要求・状態遷移・キャプチャの中断・無音での自動停止・
 /// 保存と翻訳の失敗・完了したセッションを、統合ログ（category recording）と
 /// XDG_STATE_HOME/otolog/recording.log の両方へ出す。
 /// 前者は log stream で追いやすく、後者は統合ログが消えた後も残る。
@@ -39,8 +39,11 @@ struct RecordingLog {
         }
 
         /// 経緯に関わるイベントだけを行にする。ライブ字幕と確定セグメントは利用者の発話そのもので量も多く、
-        /// 準備の進捗は細かく流れるだけで経緯の手がかりにならないため nil を返す
-        init?(event: SessionEvent) {
+        /// 準備の進捗は細かく流れるだけで経緯の手がかりにならないため nil を返す。
+        ///
+        /// saveDirectory は閉じたセッションの行に使う保存先。保存先は設定で変えられるため、
+        /// ディレクトリ名だけでは後からどのフォルダの記録か分からない。保存先と合わせた絶対パスで残す
+        init?(event: SessionEvent, saveDirectory: URL) {
             switch event {
             case .stateChanged(.idle):
                 self.init(level: .info, message: "state: idle")
@@ -62,8 +65,11 @@ struct RecordingLog {
                 self.init(level: .error, message: "store error: \(message)")
             case let .translationError(message):
                 self.init(level: .error, message: "translation error: \(message)")
+            case let .autoStopped(silence):
+                self.init(level: .info, message: "auto-stopped: silence for \(Self.describe(silence))")
             case let .sessionFinished(ref):
-                self.init(level: .info, message: "session finished: \(ref.directoryName)")
+                let path = saveDirectory.appendingPathComponent(ref.directoryName).path
+                self.init(level: .info, message: "session finished: \(path)")
             case .preparationProgress, .liveTranscript, .segmentRecorded:
                 return nil
             }
@@ -81,6 +87,14 @@ struct RecordingLog {
                 message: "start requested: via=\(origin.rawValue) input=\(inputMode.rawValue) "
                     + "locales=\(locales.joined(separator: ","))"
             )
+        }
+
+        // MARK: Private
+
+        /// 無音の長さ。設定は分単位なので分で書き、割り切れないときだけ秒で書く
+        private static func describe(_ silence: Duration) -> String {
+            let seconds = silence.components.seconds
+            return seconds % 60 == 0 ? "\(seconds / 60)m" : "\(seconds)s"
         }
     }
 

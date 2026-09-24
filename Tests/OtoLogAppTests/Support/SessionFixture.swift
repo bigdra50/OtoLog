@@ -58,6 +58,16 @@ enum SessionFixture {
         return SessionRef(directoryName: name, title: title, startedAt: startedAt)
     }
 
+    /// 発話を1件も保存しないまま閉じた記録（meta.json だけ）。
+    /// SessionFileStore は最初の append まで transcript.jsonl を作らないため、空の記録にはファイルが無い
+    @discardableResult static func makeWithoutTranscript(in root: URL, name: String) throws -> SessionRef {
+        let ref = try make(in: root, name: name, texts: [])
+        try FileManager.default.removeItem(
+            at: root.appendingPathComponent(name, isDirectory: true).appendingPathComponent("transcript.jsonl")
+        )
+        return ref
+    }
+
     static func withTempDir(_ body: (URL) throws -> Void) throws {
         let dir = makeTempDir()
         defer { try? FileManager.default.removeItem(at: dir) }

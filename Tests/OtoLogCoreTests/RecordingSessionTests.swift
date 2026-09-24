@@ -1019,6 +1019,270 @@ struct RecordingSessionTests {
         #expect(!sut.collector.events.contains(.stateChanged(.recording)))
     }
 
+    // MARK: 無音での自動停止
+
+    /// どの音源からも発話が届かないまま silenceTimeout が過ぎたら、停止と同じ手順で閉じる。
+    /// 止める理由を先に知らせ、終わり方は autoStopped で残し、停止と同じく完了を知らせる（タイトル生成とプレイブックの起点）
+    @Test func silenceForTheTimeoutClosesTheSessionAsAutoStopped() async throws {
+        let clock = TestClock()
+        let startedAt = clock.now
+        let watchdog = ManualSleep(holding: true)
+        let sut = await makeStartedSUT(
+            now: { clock.now }, sleep: { await watchdog.sleep(for: $0) }, silenceTimeout: .seconds(60)
+        )
+        #expect(await eventually { watchdog.waitingCount == 1 })
+        clock.advance(by: .seconds(59))
+        await stepWatchdogExpectingItToKeepWatching(watchdog)
+        #expect(await sut.session.state == .recording)
+
+        clock.advance(by: .seconds(1))
+        watchdog.step()
+
+        #expect(await eventually { sut.collector.events.contains(.stateChanged(.idle)) })
+        #expect(await sut.session.state == .idle)
+        #expect(await sut.store.finalizedReasons == [.autoStopped])
+        #expect(await sut.store.finalizedAts == [startedAt.addingTimeInterval(60)])
+        #expect(!sut.capture.isCapturing)
+        #expect(sut.engine.finishCallCount == 1)
+        let events = sut.collector.events
+        #expect(stateChanges(in: events) == [.preparing, .recording, .stopping, .idle])
+        #expect(finishedSessions(in: events).count == 1)
+        let autoStopIndex = try #require(events.firstIndex(of: .autoStopped(silence: .seconds(60))))
+        let stoppingIndex = try #require(events.firstIndex(of: .stateChanged(.stopping)))
+        #expect(autoStopIndex < stoppingIndex)
+    }
+
+    /// 途中経過の字幕でも、発話が届けばその時刻から数え直す
+    @Test func liveTranscriptPushesTheAutoStopBack() async {
+        let clock = TestClock()
+        let startedAt = clock.now
+        let watchdog = ManualSleep(holding: true)
+        let sut = await makeStartedSUT(
+            now: { clock.now }, sleep: { await watchdog.sleep(for: $0) }, silenceTimeout: .seconds(60)
+        )
+        #expect(await eventually { watchdog.waitingCount == 1 })
+        clock.advance(by: .seconds(45))
+        sut.engine.send(.volatile("こんにちは"))
+        #expect(await eventually { sut.collector.events.contains(.liveTranscript("こんにちは")) })
+
+        // 開始からは timeout を過ぎているが、発話からは59秒
+        clock.advance(by: .seconds(59))
+        await stepWatchdogExpectingItToKeepWatching(watchdog)
+        #expect(await sut.session.state == .recording)
+        clock.advance(by: .seconds(1))
+        watchdog.step()
+
+        #expect(await eventually { await sut.session.state == .idle })
+        #expect(await sut.store.finalizedReasons == [.autoStopped])
+        #expect(await sut.store.finalizedAts == [startedAt.addingTimeInterval(105)])
+    }
+
+    /// 確定した発話も数え直す。どの音源から届いてもよい（自分の発言だけが続く場面もある）
+    @Test func finalizedSpeechFromAnyFeedPushesTheAutoStopBack() async {
+        let clock = TestClock()
+        let watchdog = ManualSleep(holding: true)
+        let sut = await makeStartedSUT(
+            kinds: [.system, .microphone], now: { clock.now },
+            sleep: { await watchdog.sleep(for: $0) }, silenceTimeout: .seconds(60)
+        )
+        #expect(await eventually { watchdog.waitingCount == 1 })
+        clock.advance(by: .seconds(45))
+        let segment = TestFixtures.segment(text: "自分の発言", source: .microphone)
+        sut.feedDoubles[1].engine.send(.finalized(segment))
+        #expect(await eventually { await sut.store.segments == [segment] })
+
+        clock.advance(by: .seconds(59))
+        await stepWatchdogExpectingItToKeepWatching(watchdog)
+
+        #expect(await sut.session.state == .recording)
+        await sut.session.stop()
+        watchdog.release()
+    }
+
+    /// 雑音に認識器が返す句読点だけの結果では数え直さず、開始から timeout で止める
+    @Test func punctuationOnlyResultsDoNotPushTheAutoStopBack() async {
+        let clock = TestClock()
+        let startedAt = clock.now
+        let watchdog = ManualSleep(holding: true)
+        let sut = await makeStartedSUT(
+            now: { clock.now }, sleep: { await watchdog.sleep(for: $0) }, silenceTimeout: .seconds(60)
+        )
+        #expect(await eventually { watchdog.waitingCount == 1 })
+        clock.advance(by: .seconds(45))
+        sut.engine.send(.volatile(", , ,"))
+        let punctuation = TestFixtures.segment(text: "、。")
+        sut.engine.send(.finalized(punctuation))
+        #expect(await eventually { await sut.store.segments == [punctuation] })
+
+        clock.advance(by: .seconds(15))
+        watchdog.step()
+
+        #expect(await eventually { await sut.session.state == .idle })
+        #expect(await sut.store.finalizedReasons == [.autoStopped])
+        #expect(await sut.store.finalizedAts == [startedAt.addingTimeInterval(60)])
+    }
+
+    /// silenceTimeout を渡さなければ見張らない。何時間無音が続いても自分では止まらない
+    @Test func withoutASilenceTimeoutTheSessionNeverStopsItself() async {
+        let clock = TestClock()
+        let sleep = ManualSleep(holding: true)
+        let sut = await makeStartedSUT(now: { clock.now }, sleep: { await sleep.sleep(for: $0) })
+
+        clock.advance(by: .seconds(24 * 60 * 60))
+        // 見張りがあれば、結果の保存を待つ間に最初の待ちへ入っている
+        let segment = TestFixtures.segment(text: "確定")
+        sut.engine.send(.finalized(segment))
+        #expect(await eventually { await sut.store.segments == [segment] })
+
+        #expect(sleep.requestedDurations.isEmpty)
+        #expect(await sut.session.state == .recording)
+        #expect(!sut.collector.events.contains(where: isAutoStop))
+    }
+
+    /// 無音は記録が始まってから数える。準備（認識モデルのダウンロード）が timeout より長引いても、準備の間は見張らない。
+    /// 準備の間から見張ると、準備の時間まで無音に数えて早く止めるか、最初の確認で .preparing を見て見張りを終え、その記録は無音で止まらなくなる
+    @Test func silenceIsCountedFromTheStartOfRecordingNotFromPreparation() async {
+        let clock = TestClock()
+        let preparation = ManualSleep(holding: true)
+        let watchdog = ManualSleep(holding: true)
+        let sut = makeSUT(now: { clock.now }, sleep: { await watchdog.sleep(for: $0) })
+        sut.engine.onPrepare = { await preparation.sleep(for: .zero) }
+        let starting = Task { await sut.session.start(feeds: sut.feeds, locales: [ja], silenceTimeout: .seconds(60)) }
+        #expect(await eventually { preparation.waitingCount == 1 })
+        // 準備の間に見張りが確かめる時期を過ぎた
+        clock.advance(by: .seconds(90))
+        watchdog.step()
+        preparation.release()
+        await starting.value
+        let recordingStartedAt = clock.now
+
+        #expect(await eventually { watchdog.waitingCount == 1 })
+        clock.advance(by: .seconds(59))
+        await stepWatchdogExpectingItToKeepWatching(watchdog)
+        #expect(await sut.session.state == .recording)
+        clock.advance(by: .seconds(1))
+        watchdog.step()
+
+        #expect(await eventually { await sut.session.state == .idle })
+        #expect(await sut.store.finalizedReasons == [.autoStopped])
+        #expect(await sut.store.finalizedAts == [recordingStartedAt.addingTimeInterval(60)])
+    }
+
+    /// 停止は見張りを取り消す。見張りは待ちから戻ったところで取り消しに気づいて抜ける
+    @Test func stopCancelsTheSilenceWatchdog() async {
+        let gate = ManualSleep(holding: true)
+        let cancelled = OrderLog()
+        let sut = await makeStartedSUT(
+            sleep: sleepNoticingCancellation(gate, cancelled: cancelled), silenceTimeout: .seconds(60)
+        )
+        #expect(await eventually { gate.waitingCount == 1 })
+
+        await sut.session.stop()
+        gate.release()
+
+        #expect(await eventually { cancelled.entries == ["cancelled"] })
+        #expect(await sut.store.finalizedReasons == [.stopped])
+        #expect(!sut.collector.events.contains(where: isAutoStop))
+    }
+
+    /// 失敗で閉じるときも見張りを取り消す
+    @Test func failureCancelsTheSilenceWatchdog() async {
+        let gate = ManualSleep(holding: true)
+        let cancelled = OrderLog()
+        let sut = await makeStartedSUT(
+            sleep: sleepNoticingCancellation(gate, cancelled: cancelled), silenceTimeout: .seconds(60)
+        )
+        #expect(await eventually { gate.waitingCount == 1 })
+
+        sut.engine.failEvents(Described(message: "認識が止まった"))
+        #expect(await eventually { await sut.session.state == .failed("システム音声: 認識が止まった") })
+        gate.release()
+
+        #expect(await eventually { cancelled.entries == ["cancelled"] })
+        #expect(!sut.collector.events.contains(where: isAutoStop))
+    }
+
+    /// 閉じた記録の見張りが待ちから戻っても、その後に始まった次の記録には何もしない。
+    /// 取り消しでは戻らない待ちもあり、戻った見張りが見る状態は次の記録のもの
+    @Test func watchdogOfAClosedRecordingNeverStopsTheNextOne() async {
+        let clock = TestClock()
+        let earlier = ManualSleep(holding: true)
+        let later = ManualSleep(holding: true)
+        let sleepCalls = OrderLog()
+        // 1回目の待ちは最初の記録の見張り、2回目からは次の記録の見張りのもの
+        let sut = await makeStartedSUT(now: { clock.now }, sleep: { duration in
+            sleepCalls.append("sleep")
+            if sleepCalls.entries.count == 1 {
+                await earlier.sleep(for: duration)
+            } else {
+                await later.sleep(for: duration)
+            }
+        }, silenceTimeout: .seconds(60))
+        #expect(await eventually { earlier.waitingCount == 1 })
+        await sut.session.stop()
+        let next = FeedDoubles(capture: FakeCaptureSource(), engine: FakeTranscriptionEngine(), kind: .system)
+        await sut.session.start(feeds: [next.feed], locales: [ja], silenceTimeout: .seconds(60))
+        #expect(await eventually { later.waitingCount == 1 })
+        // 次の記録も無音のまま timeout を過ぎた。止めてよいのは次の記録の見張りだけ
+        clock.advance(by: .seconds(60))
+
+        earlier.release()
+
+        // 待ち明けの確認は actor 上で終わり、外からその終わりを待つ手段は無い。待ちから戻ったのを見てから確かめる。
+        // 正しく抜けていれば、確かめる時期によらず何も起きていない
+        #expect(await eventually { earlier.returnedCount == 1 })
+        #expect(await sut.session.state == .recording)
+        #expect(next.capture.isCapturing)
+        #expect(await sut.store.finalizedReasons == [.stopped])
+        #expect(!sut.collector.events.contains(where: isAutoStop))
+        await sut.session.stop()
+        later.release()
+    }
+
+    /// 自動停止は見張りのタスクの上で閉じる。閉じる側がそのタスクを取り消すと、取り消されたタスクで engine.finish が走り
+    /// （SpeechAnalyzer の finalize は CancellationError で抜ける）、finalize が確定させる最後の発話を落とす
+    @Test func autoStopStoresTheSegmentsEmittedDuringFinish() async {
+        let clock = TestClock()
+        let watchdog = ManualSleep(holding: true)
+        let sut = await makeStartedSUT(
+            now: { clock.now }, sleep: { await watchdog.sleep(for: $0) }, silenceTimeout: .seconds(60)
+        )
+        let lastWords = TestFixtures.segment(text: "finalize で確定した最後の発話")
+        sut.engine.eventsOnFinish = [.finalized(lastWords)]
+        #expect(await eventually { watchdog.waitingCount == 1 })
+
+        clock.advance(by: .seconds(60))
+        watchdog.step()
+
+        #expect(await eventually { await sut.session.state == .idle })
+        #expect(await sut.store.segments == [lastWords])
+        #expect(await sut.store.finalizedReasons == [.autoStopped])
+    }
+
+    /// 見張りは15秒ごとに確かめる。止めるのは無音が timeout に達してから最大15秒遅れる
+    @Test func watchdogChecksEveryFifteenSeconds() async {
+        let watchdog = ManualSleep(holding: true)
+
+        let sut = await makeStartedSUT(sleep: { await watchdog.sleep(for: $0) }, silenceTimeout: .seconds(60))
+
+        #expect(await eventually { watchdog.waitingCount == 1 })
+        #expect(watchdog.requestedDurations == [.seconds(15)])
+        await sut.session.stop()
+        watchdog.release()
+    }
+
+    /// silenceTimeout が確かめる間隔より短ければ、silenceTimeout ごとに確かめる。間隔ごとでは timeout の何倍も遅れて止まる
+    @Test func watchdogChecksAtTheTimeoutWhenItIsShorterThanTheCheckInterval() async {
+        let watchdog = ManualSleep(holding: true)
+
+        let sut = await makeStartedSUT(sleep: { await watchdog.sleep(for: $0) }, silenceTimeout: .seconds(10))
+
+        #expect(await eventually { watchdog.waitingCount == 1 })
+        #expect(watchdog.requestedDurations == [.seconds(10)])
+        await sut.session.stop()
+        watchdog.release()
+    }
+
     // MARK: 翻訳
 
     /// 訳はセグメントへ載せてから保存する。ストアには訳つきの1件だけが渡る
@@ -1122,7 +1386,8 @@ struct RecordingSessionTests {
         return policy
     }
 
-    /// sleep の既定は待たずに戻る。再起動を含むテストが実時間の settleDelay を待たないように
+    /// sleep の既定は待たずに戻る。再起動を含むテストが実時間の settleDelay を待たないように。
+    /// 無音を見張るテストは、見張りが空回りしないよう待つ sleep（ManualSleep）を渡す
     private func makeSUT(
         kinds: [AudioSourceKind] = [.system],
         now: @escaping @Sendable () -> Date = { Date() },
@@ -1153,7 +1418,8 @@ struct RecordingSessionTests {
         translator: (any Translator)? = nil,
         translationTimeout: Duration = .seconds(10),
         restartPolicy: CaptureRestartPolicy = .default,
-        sleep: @escaping @Sendable (Duration) async throws -> Void = { _ in }
+        sleep: @escaping @Sendable (Duration) async throws -> Void = { _ in },
+        silenceTimeout: Duration? = nil
     ) async -> SUT {
         let sut = makeSUT(
             kinds: kinds, now: now, translationTimeout: translationTimeout,
@@ -1164,7 +1430,9 @@ struct RecordingSessionTests {
         if let translator {
             factory = { _ in translator }
         }
-        await sut.session.start(feeds: sut.feeds, locales: [ja], makeTranslator: factory)
+        await sut.session.start(
+            feeds: sut.feeds, locales: [ja], makeTranslator: factory, silenceTimeout: silenceTimeout
+        )
         _ = await eventually { await sut.session.state == .recording }
         return sut
     }
@@ -1196,5 +1464,30 @@ struct RecordingSessionTests {
         capture.fail(Described(message: "1回目"))
         #expect(await eventually { capture.startCallCount == 2 })
         capture.fail(Described(message: "2回目"))
+    }
+
+    private func isAutoStop(_ event: SessionEvent) -> Bool {
+        if case .autoStopped = event { true } else { false }
+    }
+
+    /// 実際の待ち（Task.sleep）と同じく、戻ったときにタスクが取り消されていたら CancellationError を投げる sleep。
+    /// 取り消しに気づいて抜けた回数を cancelled に残す
+    private func sleepNoticingCancellation(
+        _ gate: ManualSleep, cancelled: OrderLog
+    ) -> @Sendable (Duration) async throws -> Void {
+        { duration in
+            await gate.sleep(for: duration)
+            if Task.isCancelled {
+                cancelled.append("cancelled")
+                throw CancellationError()
+            }
+        }
+    }
+
+    /// 見張りを1周進め、無音が続いていないと判断して次の待ちに入ったところまで待つ
+    private func stepWatchdogExpectingItToKeepWatching(_ watchdog: ManualSleep) async {
+        let requested = watchdog.requestedDurations.count
+        watchdog.step()
+        #expect(await eventually { watchdog.requestedDurations.count == requested + 1 })
     }
 }

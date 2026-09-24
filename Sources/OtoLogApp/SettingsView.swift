@@ -66,6 +66,14 @@ struct SettingsView: View {
                     .textFieldStyle(.roundedBorder)
             }
 
+            Picker("無音で自動停止", selection: $settings.silenceAutoStopMinutes) {
+                ForEach(AppSettings.silenceAutoStopChoices, id: \.self) { minutes in
+                    Text(minutes == 0 ? "オフ" : "\(minutes)分").tag(minutes)
+                }
+            }
+            .pickerStyle(.menu)
+            .help("文字起こしされる発話がこの時間届かなければ記録を止めます。次の記録から反映されます")
+
             Picker("停止時の自動処理", selection: $settings.postStopAction) {
                 ForEach(PostStopAction.allCases, id: \.self) { action in
                     Text(action.displayName).tag(action)
