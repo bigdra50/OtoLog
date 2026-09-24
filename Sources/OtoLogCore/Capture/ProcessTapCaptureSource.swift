@@ -17,6 +17,9 @@ public final class ProcessTapCaptureSource: AudioCaptureSource, @unchecked Senda
     // MARK: Public
 
     public func start(targetFormat: AVAudioFormat) async throws -> AsyncThrowingStream<AudioChunk, any Error> {
+        // stop を経ずに起動し直されても、前回の IO proc・aggregate device・タップを破棄してから作る。
+        // ID を上書きすると前回の分が破棄されずに残り、オーディオ HAL を掴み続ける
+        await stop()
         // 自プロセスの再生音を含めない（将来アプリが通知音等を出しても記録を汚さない）
         let selfObjectID = try? Self.processObjectID(forPID: ProcessInfo.processInfo.processIdentifier)
         let description = CATapDescription(
@@ -63,15 +66,16 @@ public final class ProcessTapCaptureSource: AudioCaptureSource, @unchecked Senda
             }
             self.procID = procID
 
-            // aggregate の失効（まれな構成変更）を検知して再起動経路へ流す
+            // aggregate の失効（まれな構成変更）を検知して再起動経路へ流す。
+            // この監視は外さない。Swift から AudioObjectRemovePropertyListenerBlock に渡したブロックは、
+            // 登録に使ったものをそのまま渡しても一致せず、監視は残る。
+            // 残った監視は aggregate を破棄したときにも呼ばれるので、見るのはこの aggregate、
+            // 終わらせるのはこの start のストリームに限る
             var aliveAddress = Self.aliveAddress
-            let aliveStatus = AudioObjectAddPropertyListenerBlock(
-                aggregateID, &aliveAddress, sampleQueue
-            ) { [weak self] _, _ in
-                guard let self, !self.isDeviceAlive() else { return }
-                self.continuation?.finish(throwing: CaptureError.captureDeviceInvalidated)
+            AudioObjectAddPropertyListenerBlock(aggregateID, &aliveAddress, sampleQueue) { [aggregateID] _, _ in
+                guard !Self.isDeviceAlive(aggregateID) else { return }
+                continuation.finish(throwing: CaptureError.captureDeviceInvalidated)
             }
-            aliveListenerInstalled = aliveStatus == noErr
 
             let startStatus = AudioDeviceStart(aggregateID, procID)
             guard startStatus == noErr else {
@@ -90,12 +94,10 @@ public final class ProcessTapCaptureSource: AudioCaptureSource, @unchecked Senda
             AudioDeviceDestroyIOProcID(aggregateID, procID)
         }
         procID = nil
+        // aggregate の破棄で生存監視が呼ばれる前に正常終了させる。止めただけのストリームを失効の throw で終わらせない
+        continuation?.finish()
+        continuation = nil
         if aggregateID != kAudioObjectUnknown {
-            if aliveListenerInstalled {
-                var aliveAddress = Self.aliveAddress
-                AudioObjectRemovePropertyListenerBlock(aggregateID, &aliveAddress, sampleQueue) { _, _ in }
-                aliveListenerInstalled = false
-            }
             AudioHardwareDestroyAggregateDevice(aggregateID)
             aggregateID = AudioObjectID(kAudioObjectUnknown)
         }
@@ -103,8 +105,6 @@ public final class ProcessTapCaptureSource: AudioCaptureSource, @unchecked Senda
             AudioHardwareDestroyProcessTap(tapID)
             tapID = AudioObjectID(kAudioObjectUnknown)
         }
-        continuation?.finish()
-        continuation = nil
     }
 
     // MARK: Internal
@@ -140,7 +140,6 @@ public final class ProcessTapCaptureSource: AudioCaptureSource, @unchecked Senda
     private var aggregateID = AudioObjectID(kAudioObjectUnknown)
     private var procID: AudioDeviceIOProcID?
     private var continuation: AsyncThrowingStream<AudioChunk, any Error>.Continuation?
-    private var aliveListenerInstalled = false
     private let sampleQueue = DispatchQueue(label: "com.bigdra50.OtoLog.ProcessTapCapture")
 
     /// PID → CoreAudio プロセスオブジェクト ID（タップの除外リストは PID ではなくこの ID を取る）
@@ -181,11 +180,11 @@ public final class ProcessTapCaptureSource: AudioCaptureSource, @unchecked Senda
         return format
     }
 
-    private func isDeviceAlive() -> Bool {
-        var address = Self.aliveAddress
+    private static func isDeviceAlive(_ deviceID: AudioObjectID) -> Bool {
+        var address = aliveAddress
         var alive: UInt32 = 0
         var size = UInt32(MemoryLayout<UInt32>.size)
-        let status = AudioObjectGetPropertyData(aggregateID, &address, 0, nil, &size, &alive)
+        let status = AudioObjectGetPropertyData(deviceID, &address, 0, nil, &size, &alive)
         return status == noErr && alive != 0
     }
 
