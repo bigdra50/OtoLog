@@ -15,7 +15,7 @@ struct IdleTranscriptStore: TranscriptStore {
         throw LayoutFixtureMisuse.storeTouched
     }
 
-    func finalize(endedAt _: Date) async throws -> SessionRef? {
+    func finalize(endedAt _: Date, reason _: SessionEndReason) async throws -> SessionRef? {
         throw LayoutFixtureMisuse.storeTouched
     }
 }

@@ -8,6 +8,8 @@ actor SpyStore: TranscriptStore {
     private(set) var beganContexts: [TranscriptionContext] = []
     private(set) var segments: [TranscriptSegment] = []
     private(set) var finalizedAts: [Date] = []
+    /// finalize に渡された終わり方。呼ばれた順
+    private(set) var finalizedReasons: [SessionEndReason] = []
 
     /// finalize が返す参照。既定はディレクトリ名固定のダミー
     var finalizeResult: SessionRef? = SessionRef(
@@ -18,8 +20,12 @@ actor SpyStore: TranscriptStore {
 
     /// 呼び出し順の検証用フック
     var onFinalize: (@Sendable () -> Void)?
+    var onAppend: (@Sendable () -> Void)?
+    /// begin の先頭で待つ。保存先の確保を途中で止めておくのに使う
+    var onBegin: (@Sendable () async -> Void)?
 
-    func begin(context: TranscriptionContext) throws {
+    func begin(context: TranscriptionContext) async throws {
+        await onBegin?()
         if let beginError { throw beginError }
         beganContexts.append(context)
     }
@@ -27,10 +33,12 @@ actor SpyStore: TranscriptStore {
     func append(_ segment: TranscriptSegment) throws {
         if let errorToThrow { throw errorToThrow }
         segments.append(segment)
+        onAppend?()
     }
 
-    func finalize(endedAt: Date) throws -> SessionRef? {
+    func finalize(endedAt: Date, reason: SessionEndReason) throws -> SessionRef? {
         finalizedAts.append(endedAt)
+        finalizedReasons.append(reason)
         onFinalize?()
         return beganContexts.isEmpty ? nil : finalizeResult
     }
@@ -45,6 +53,14 @@ actor SpyStore: TranscriptStore {
 
     func setOnFinalize(_ hook: (@Sendable () -> Void)?) {
         onFinalize = hook
+    }
+
+    func setOnAppend(_ hook: (@Sendable () -> Void)?) {
+        onAppend = hook
+    }
+
+    func setOnBegin(_ hook: (@Sendable () async -> Void)?) {
+        onBegin = hook
     }
 
     func setFinalizeResult(_ ref: SessionRef?) {

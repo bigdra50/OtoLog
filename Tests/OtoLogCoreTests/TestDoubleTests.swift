@@ -107,6 +107,23 @@ struct TestDoubleTests {
         #expect(recorded.map(\.text) == ["a"])
     }
 
+    /// begin する前の finalize には参照を返さない。閉じたのが確保の後かどうかを、上位テストはこれで見分ける
+    @Test func spyStoreFinalizeReturnsARefOnlyAfterBegin() async throws {
+        let store = SpyStore()
+        let context = TranscriptionContext(
+            locale: "ja-JP", source: .system,
+            sessionID: UUID(), sessionStartedAt: Date()
+        )
+
+        let beforeBegin = try await store.finalize(endedAt: Date(), reason: .stopped)
+        try await store.begin(context: context)
+        let afterBegin = try await store.finalize(endedAt: Date(), reason: .failed("止まった"))
+
+        #expect(beforeBegin == nil)
+        #expect(afterBegin != nil)
+        #expect(await store.finalizedReasons == [.stopped, .failed("止まった")])
+    }
+
     @Test func fakeTextGeneratorRecordsPromptsAndCanThrow() async throws {
         struct Offline: Error {}
         let generator = FakeTextGenerator(result: "生成結果")
@@ -146,5 +163,28 @@ struct TestDoubleTests {
         await source.stop()
         try await Task.sleep(for: .milliseconds(50))
         #expect(engine.consumedChunkCount == 1)
+    }
+
+    /// finish はイベント列を閉じる前に eventsOnFinish を流す。実エンジンが判定待ちのセグメントを finish で吐き出すのと同じ順
+    @Test func fakeEngineFlushesEventsOnFinishBeforeClosing() async throws {
+        let engine = FakeTranscriptionEngine()
+        let pending = TestFixtures.segment(text: "判定待ち")
+        engine.eventsOnFinish = [.finalized(pending)]
+        let source = FakeCaptureSource()
+        let chunks = try await source.start(targetFormat: format)
+        let context = TranscriptionContext(
+            locale: "ja-JP", source: .system,
+            sessionID: UUID(), sessionStartedAt: Date()
+        )
+        let events = try await engine.start(chunks: chunks, context: context)
+
+        await engine.finish()
+
+        var received: [TranscriptEvent] = []
+        for try await event in events {
+            received.append(event)
+        }
+        #expect(received == [.finalized(pending)])
+        await source.stop()
     }
 }

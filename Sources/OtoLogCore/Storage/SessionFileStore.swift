@@ -57,10 +57,10 @@ public actor SessionFileStore: TranscriptStore {
         }
     }
 
-    public func finalize(endedAt: Date) throws -> SessionRef? {
+    public func finalize(endedAt: Date, reason: SessionEndReason) throws -> SessionRef? {
         guard let active else { return nil }
         var meta = active.meta
-        meta.endedAt = endedAt
+        meta.markEnded(at: endedAt, reason: reason)
         try SessionMetaCoder.encode(meta).write(
             to: active.directory.appendingPathComponent("meta.json"), options: .atomic
         )

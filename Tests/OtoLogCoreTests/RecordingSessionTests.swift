@@ -99,6 +99,7 @@ struct RecordingSessionTests {
 
         #expect(await eventually { sut.collector.events.contains(.sessionFinished(ref)) })
         #expect(await sut.store.finalizedAts == [endedAt])
+        #expect(await sut.store.finalizedReasons == [.stopped])
     }
 
     @Test func stopWhenIdleDoesNotFinalize() async {
@@ -661,6 +662,363 @@ struct RecordingSessionTests {
         #expect(await eventually { restartAttempts(in: sut.collector.events) == [1, 2, 3, nil] })
     }
 
+    // MARK: 失敗で閉じる（停止と同じ手順で閉じ、終わり方を残す）
+
+    /// 失敗しても、そこまでの記録は失敗として閉じる。
+    /// 1件でも保存していれば完了を知らせ、タイトル生成とプレイブックを記録できた分に走らせる
+    @Test func failureAfterSegmentsFinalizesAsFailedAndReportsTheSession() async {
+        let sut = await makeStartedSUT(restartPolicy: singleRestart)
+        let segment = TestFixtures.segment(text: "閉会のあいさつ")
+        sut.engine.send(.finalized(segment))
+        #expect(await eventually { await sut.store.segments == [segment] })
+
+        await interruptUntilGivingUp(sut.capture)
+
+        let failed = SessionEvent.stateChanged(.failed("システム音声: 2回目"))
+        #expect(await eventually { sut.collector.events.contains(failed) })
+        #expect(await sut.store.finalizedReasons == [.failed("システム音声: 2回目")])
+        #expect(finishedSessions(in: sut.collector.events).count == 1)
+    }
+
+    /// 閉じた後も失敗の状態で終わる。ポップオーバーは状態から理由を出すため、閉じた後も失敗が見えている
+    @Test func failureStaysTheFinalStateAfterTheSessionIsClosed() async throws {
+        let sut = await makeStartedSUT()
+        sut.engine.send(.finalized(TestFixtures.segment(text: "確定")))
+        #expect(await eventually { await sut.store.segments.count == 1 })
+
+        sut.engine.failEvents(Described(message: "認識が止まった"))
+
+        let failed = SessionState.failed("システム音声: 認識が止まった")
+        #expect(await eventually { sut.collector.events.contains(.stateChanged(failed)) })
+        let events = sut.collector.events
+        #expect(stateChanges(in: events) == [.preparing, .recording, .stopping, failed])
+        let finishedIndex = try #require(events.firstIndex { if case .sessionFinished = $0 { true } else { false } })
+        let failedIndex = try #require(events.firstIndex(of: .stateChanged(failed)))
+        #expect(finishedIndex < failedIndex)
+        #expect(await sut.session.state == failed)
+    }
+
+    /// 何も保存していない失敗では完了を知らせない。空の記録にタイトル生成やプレイブックを走らせても必ず失敗する
+    @Test func failureWithoutSegmentsFinalizesWithoutReportingTheSession() async {
+        let sut = await makeStartedSUT()
+
+        sut.engine.failEvents(Described(message: "認識が止まった"))
+
+        let failed = SessionEvent.stateChanged(.failed("システム音声: 認識が止まった"))
+        #expect(await eventually { sut.collector.events.contains(failed) })
+        #expect(await sut.store.finalizedReasons == [.failed("システム音声: 認識が止まった")])
+        #expect(finishedSessions(in: sut.collector.events).isEmpty)
+    }
+
+    /// 失敗でもエンジンを finish させ、言語の判定待ちで残っていたセグメントを保存してから閉じる。
+    /// 諦める判断は失敗したフィードの中継タスクの上で走る。そのタスク自身の完走は待たない（待つと戻らない）
+    @Test func failureStoresSegmentsEmittedDuringFinishBeforeFinalizing() async {
+        let sut = await makeStartedSUT(restartPolicy: singleRestart)
+        let order = OrderLog()
+        let pending = TestFixtures.segment(text: "言語の判定待ち")
+        sut.engine.eventsOnFinish = [.finalized(pending)]
+        sut.engine.onFinish = { order.append("engine.finish") }
+        await sut.store.setOnAppend { order.append("store.append") }
+        await sut.store.setOnFinalize { order.append("store.finalize") }
+
+        await interruptUntilGivingUp(sut.capture)
+
+        #expect(await eventually { await sut.session.state == .failed("システム音声: 2回目") })
+        #expect(order.entries == ["engine.finish", "store.append", "store.finalize"])
+        #expect(await sut.store.segments == [pending])
+        #expect(await eventually { finishedSessions(in: sut.collector.events).count == 1 })
+    }
+
+    /// エンジンの失敗は、そのエンジンの結果を受けるタスクの上で閉じる。そのタスク自身は待たず、
+    /// 他のフィードのエンジンが finish で吐き出したセグメントは保存してから閉じる
+    @Test func engineFailureStoresTheOtherFeedsLastSegmentsBeforeFinalizing() async {
+        let sut = await makeStartedSUT(kinds: [.system, .microphone])
+        let pending = TestFixtures.segment(text: "自分の発言", source: .microphone)
+        sut.feedDoubles[1].engine.eventsOnFinish = [.finalized(pending)]
+
+        sut.feedDoubles[0].engine.failEvents(Described(message: "認識が止まった"))
+
+        #expect(await eventually { await sut.session.state == .failed("システム音声: 認識が止まった") })
+        #expect(await sut.store.segments == [pending])
+        #expect(await sut.store.finalizedReasons == [.failed("システム音声: 認識が止まった")])
+        for feed in sut.feedDoubles {
+            #expect(feed.engine.finishCallCount == 1)
+        }
+    }
+
+    /// 保存先を確保した後にフィードの起動に失敗したら、起動したものを止めて空のセッションを失敗として閉じる。
+    /// 何も記録していないので完了は知らせない
+    @Test func startFailureAfterBeginFinalizesAsFailed() async {
+        let sut = makeSUT(kinds: [.system, .microphone])
+        sut.feedDoubles[1].capture.errorOnStart = Described(message: "許可が無い")
+
+        await sut.session.start(feeds: sut.feeds, locales: [ja])
+
+        #expect(await sut.session.state == .failed("マイク: 許可が無い"))
+        #expect(await sut.store.finalizedReasons == [.failed("マイク: 許可が無い")])
+        #expect(sut.feedDoubles[0].capture.stopCallCount == 1)
+        #expect(sut.feedDoubles[0].engine.finishCallCount == 1)
+        #expect(await eventually { sut.collector.events.contains(.stateChanged(.failed("マイク: 許可が無い"))) })
+        #expect(finishedSessions(in: sut.collector.events).isEmpty)
+    }
+
+    /// 保存先を確保できなかった開始には閉じるものが無い
+    @Test func startFailureAtBeginDoesNotFinalize() async {
+        let sut = makeSUT()
+        await sut.store.setBeginError(Described(message: "保存先に書けない"))
+
+        await sut.session.start(feeds: sut.feeds, locales: [ja])
+
+        #expect(await sut.session.state == .failed("保存先に書けない"))
+        #expect(await sut.store.finalizedReasons.isEmpty)
+    }
+
+    /// 失敗で閉じている途中の停止は何もせずに戻る。閉じるのは失敗の理由で1回だけで、失敗の状態で終わる
+    @Test func stopDuringFailureTeardownLeavesTheFailure() async {
+        let gate = ManualSleep(holding: true)
+        let sut = await makeStartedSUT()
+        sut.capture.onStop = { await gate.sleep(for: .zero) }
+        sut.engine.failEvents(Described(message: "認識が止まった"))
+        #expect(await eventually { gate.waitingCount == 1 })
+
+        // 閉じている途中の記録に止める側が触れると戻らないため、別タスクで呼んで戻ったことを確かめる
+        let returns = OrderLog()
+        Task {
+            await sut.session.stop()
+            returns.append("stop")
+        }
+
+        #expect(await eventually { returns.entries == ["stop"] })
+        #expect(await sut.session.state == .stopping)
+        gate.release()
+        #expect(await eventually { await sut.session.state == .failed("システム音声: 認識が止まった") })
+        #expect(await sut.store.finalizedReasons == [.failed("システム音声: 認識が止まった")])
+        #expect(!sut.collector.events.contains(.stateChanged(.idle)))
+    }
+
+    /// 停止の途中に届いた失敗は、停止の終わり方を上書きしない
+    @Test func failureDuringStopKeepsTheStop() async {
+        let gate = ManualSleep(holding: true)
+        let sut = await makeStartedSUT()
+        sut.capture.onStop = { await gate.sleep(for: .zero) }
+        let stopping = Task { await sut.session.stop() }
+        #expect(await eventually { gate.waitingCount == 1 })
+
+        // 停止はこのエンジンの結果を受けるタスクの完走を待つため、戻った時点で失敗の知らせは処理済み
+        sut.engine.failEvents(Described(message: "認識が止まった"))
+        gate.release()
+        await stopping.value
+
+        #expect(await sut.session.state == .idle)
+        #expect(await sut.store.finalizedReasons == [.stopped])
+        #expect(!sut.collector.events.contains { if case .stateChanged(.failed) = $0 { true } else { false } })
+    }
+
+    // MARK: 開始の途中の停止
+
+    /// 認識モデルを準備している間に止められたら、保存先を確保せずに終える
+    @Test func stopWhilePreparingEndsWithoutBeginningTheStore() async {
+        let gate = ManualSleep(holding: true)
+        let sut = makeSUT()
+        sut.engine.onPrepare = { await gate.sleep(for: .zero) }
+        let starting = Task { await sut.session.start(feeds: sut.feeds, locales: [ja]) }
+        #expect(await eventually { gate.waitingCount == 1 })
+
+        await sut.session.stop()
+        gate.release()
+        await starting.value
+
+        #expect(await sut.session.state == .idle)
+        #expect(await sut.store.beganContexts.isEmpty)
+        #expect(await sut.store.finalizedReasons.isEmpty)
+        #expect(sut.capture.startCallCount == 0)
+    }
+
+    /// 保存先を確保している間に止められたら、確保し終えるのを待って停止として1回だけ閉じる。
+    /// 閉じるのが確保より先だと、確保されたセッションが開いたまま残る
+    @Test func stopWhileTheStoreIsBeginningClosesItOnceAsStopped() async {
+        let gate = ManualSleep(holding: true)
+        let sut = makeSUT()
+        await sut.store.setOnBegin { await gate.sleep(for: .zero) }
+        let starting = Task { await sut.session.start(feeds: sut.feeds, locales: [ja]) }
+        #expect(await eventually { gate.waitingCount == 1 })
+
+        // 閉じる側は確保の終わりを待つため、別タスクで止める
+        let stopping = Task { await sut.session.stop() }
+        #expect(await eventually { await sut.session.state == .stopping })
+        gate.release()
+        await starting.value
+        await stopping.value
+
+        #expect(await sut.session.state == .idle)
+        #expect(await sut.store.finalizedReasons == [.stopped])
+        // SpyStore は確保する前の finalize に参照を返さない。完了が流れたのは、確保し終えてから閉じたから
+        #expect(await eventually { finishedSessions(in: sut.collector.events).count == 1 })
+        #expect(sut.engine.receivedContexts.isEmpty)
+        #expect(sut.capture.startCallCount == 0)
+    }
+
+    /// エンジンを起動している間に止められたら、そのエンジンを終わらせ、キャプチャは起動しない
+    @Test func stopWhileTheEngineIsStartingFinishesItWithoutStartingTheCapture() async {
+        let gate = ManualSleep(holding: true)
+        let sut = makeSUT()
+        sut.engine.onStart = { await gate.sleep(for: .zero) }
+        let starting = Task { await sut.session.start(feeds: sut.feeds, locales: [ja]) }
+        #expect(await eventually { gate.waitingCount == 1 })
+
+        await sut.session.stop()
+        gate.release()
+        await starting.value
+
+        #expect(await sut.session.state == .idle)
+        #expect(sut.engine.finishCallCount == 1)
+        #expect(sut.capture.startCallCount == 0)
+        #expect(await sut.store.finalizedReasons == [.stopped])
+    }
+
+    /// キャプチャを起動している間に止められたら、.recording に入らずに終える。
+    /// 起動の途中のキャプチャに stop を重ねず、起動し終えたところで1回だけ止める。中継していたフィードは停止が止める
+    @Test func stopWhileACaptureIsStartingEndsWithoutRecording() async {
+        let gate = ManualSleep(holding: true)
+        let sut = makeSUT(kinds: [.system, .microphone])
+        let microphone = sut.feedDoubles[1].capture
+        microphone.onStart = { await gate.sleep(for: .zero) }
+        let starting = Task { await sut.session.start(feeds: sut.feeds, locales: [ja]) }
+        #expect(await eventually { gate.waitingCount == 1 })
+
+        await sut.session.stop()
+        gate.release()
+        await starting.value
+
+        #expect(await sut.session.state == .idle)
+        #expect(!sut.collector.events.contains(.stateChanged(.recording)))
+        for feed in sut.feedDoubles {
+            #expect(feed.capture.startCallCount == 1)
+            #expect(feed.capture.stopCallCount == 1)
+            #expect(feed.capture.maxConcurrentCalls == 1)
+            #expect(!feed.capture.isCapturing)
+        }
+        #expect(await sut.store.finalizedReasons == [.stopped])
+    }
+
+    /// 止められた後にキャプチャの起動が失敗しても、掴みかけたものを放すため1回だけ止める。失敗として閉じ直さない
+    @Test func captureStartFailingAfterStopIsStoppedOnceWithoutFailing() async {
+        let gate = ManualSleep(holding: true)
+        let sut = makeSUT()
+        sut.capture.onStart = { await gate.sleep(for: .zero) }
+        sut.capture.errorOnStart = Described(message: "許可が無い")
+        let starting = Task { await sut.session.start(feeds: sut.feeds, locales: [ja]) }
+        #expect(await eventually { gate.waitingCount == 1 })
+
+        await sut.session.stop()
+        gate.release()
+        await starting.value
+
+        #expect(await sut.session.state == .idle)
+        #expect(sut.capture.stopCallCount == 1)
+        #expect(sut.capture.maxConcurrentCalls == 1)
+        #expect(await sut.store.finalizedReasons == [.stopped])
+    }
+
+    /// 止められた開始が待ちから戻ったとき、次の記録の準備が始まっていても続きを進めない
+    @Test func stoppedStartDoesNotContinueIntoTheNextRecording() async {
+        let firstGate = ManualSleep(holding: true)
+        let secondGate = ManualSleep(holding: true)
+        let sut = makeSUT()
+        sut.engine.onPrepare = { await firstGate.sleep(for: .zero) }
+        let first = Task { await sut.session.start(feeds: sut.feeds, locales: [ja]) }
+        #expect(await eventually { firstGate.waitingCount == 1 })
+        await sut.session.stop()
+        let next = FeedDoubles(capture: FakeCaptureSource(), engine: FakeTranscriptionEngine(), kind: .system)
+        next.engine.onPrepare = { await secondGate.sleep(for: .zero) }
+        let second = Task { await sut.session.start(feeds: [next.feed], locales: [ja]) }
+        #expect(await eventually { secondGate.waitingCount == 1 })
+
+        firstGate.release()
+        await first.value
+        secondGate.release()
+        await second.value
+
+        #expect(await sut.session.state == .recording)
+        #expect(await sut.store.beganContexts.count == 1)
+        #expect(sut.engine.receivedContexts.isEmpty)
+        #expect(sut.capture.startCallCount == 0)
+        #expect(next.capture.startCallCount == 1)
+    }
+
+    // MARK: 開始の途中の中断と失敗
+
+    /// 起動の途中（.preparing）に届いた中断も落とさない。中断はすぐ知らせるが、他のキャプチャを起動している間は
+    /// 中断したキャプチャに触れず、.recording に入ってから再起動の方針どおりに再起動する
+    @Test func interruptionWhilePreparingRestartsTheFeedOnceRecording() async {
+        let gate = ManualSleep(holding: true)
+        let sut = makeSUT(kinds: [.system, .microphone])
+        let system = sut.feedDoubles[0].capture
+        sut.feedDoubles[1].capture.onStart = { await gate.sleep(for: .zero) }
+        let starting = Task { await sut.session.start(feeds: sut.feeds, locales: [ja]) }
+        #expect(await eventually { gate.waitingCount == 1 })
+
+        system.fail(Described(message: "構成が変わった"))
+
+        #expect(await eventually {
+            interruptions(in: sut.collector.events) == [
+                CaptureInterruption(source: .system, reason: "構成が変わった", restartAttempt: 1),
+            ]
+        })
+        #expect(system.stopCallCount == 0)
+        #expect(system.startCallCount == 1)
+        gate.release()
+        await starting.value
+        #expect(await eventually { system.startCallCount == 2 })
+        #expect(await sut.session.state == .recording)
+        #expect(system.maxConcurrentCalls == 1)
+        system.emit(AudioChunk(buffer: TestSignal.sine(format: sut.feedDoubles[0].engine.prepareFormat, seconds: 0.1)))
+        #expect(await eventually { sut.feedDoubles[0].engine.consumedChunkCount == 1 })
+    }
+
+    /// 起動の途中に中断したまま止められたら、再起動せずに閉じる。中断したキャプチャは停止が1回だけ止める
+    @Test func stopAfterAnInterruptionWhilePreparingClosesWithoutRestarting() async {
+        let gate = ManualSleep(holding: true)
+        let sut = makeSUT(kinds: [.system, .microphone])
+        let system = sut.feedDoubles[0].capture
+        sut.feedDoubles[1].capture.onStart = { await gate.sleep(for: .zero) }
+        let starting = Task { await sut.session.start(feeds: sut.feeds, locales: [ja]) }
+        #expect(await eventually { gate.waitingCount == 1 })
+        system.fail(Described(message: "構成が変わった"))
+        #expect(await eventually { !interruptions(in: sut.collector.events).isEmpty })
+
+        await sut.session.stop()
+        gate.release()
+        await starting.value
+
+        #expect(await sut.session.state == .idle)
+        #expect(system.startCallCount == 1)
+        #expect(system.stopCallCount == 1)
+        #expect(await sut.store.finalizedReasons == [.stopped])
+    }
+
+    /// 起動の途中にエンジンが失敗したら、起動に失敗したのと同じく記録全体を失敗として閉じる。
+    /// エンジンの失敗は再起動では直らないため待たない。起動の途中のキャプチャは起動し終えたところで1回だけ止まる
+    @Test func engineFailureWhilePreparingFailsTheStart() async {
+        let gate = ManualSleep(holding: true)
+        let sut = makeSUT(kinds: [.system, .microphone])
+        let microphone = sut.feedDoubles[1].capture
+        microphone.onStart = { await gate.sleep(for: .zero) }
+        let starting = Task { await sut.session.start(feeds: sut.feeds, locales: [ja]) }
+        #expect(await eventually { gate.waitingCount == 1 })
+
+        sut.feedDoubles[0].engine.failEvents(Described(message: "認識が止まった"))
+
+        #expect(await eventually { await sut.session.state == .failed("システム音声: 認識が止まった") })
+        gate.release()
+        await starting.value
+        #expect(await sut.session.state == .failed("システム音声: 認識が止まった"))
+        #expect(await sut.store.finalizedReasons == [.failed("システム音声: 認識が止まった")])
+        #expect(microphone.stopCallCount == 1)
+        #expect(microphone.maxConcurrentCalls == 1)
+        #expect(!sut.collector.events.contains(.stateChanged(.recording)))
+    }
+
     // MARK: 翻訳
 
     /// 訳はセグメントへ載せてから保存する。ストアには訳つきの1件だけが渡る
@@ -819,5 +1177,24 @@ struct RecordingSessionTests {
 
     private func restartAttempts(in events: [SessionEvent]) -> [Int?] {
         interruptions(in: events).map(\.restartAttempt)
+    }
+
+    private func stateChanges(in events: [SessionEvent]) -> [SessionState] {
+        events.compactMap { event -> SessionState? in
+            if case let .stateChanged(state) = event { state } else { nil }
+        }
+    }
+
+    private func finishedSessions(in events: [SessionEvent]) -> [SessionRef] {
+        events.compactMap { event -> SessionRef? in
+            if case let .sessionFinished(ref) = event { ref } else { nil }
+        }
+    }
+
+    /// singleRestart のもとで、1回目の中断は再起動させ、2回目で諦めさせる
+    private func interruptUntilGivingUp(_ capture: FakeCaptureSource) async {
+        capture.fail(Described(message: "1回目"))
+        #expect(await eventually { capture.startCallCount == 2 })
+        capture.fail(Described(message: "2回目"))
     }
 }

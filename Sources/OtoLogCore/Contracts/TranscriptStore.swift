@@ -8,6 +8,7 @@ public protocol TranscriptStore: Sendable {
 
     func append(_ segment: TranscriptSegment) async throws
 
-    /// セッションを閉じ、保存済みセッションへの参照を返す。begin していなければ nil
-    func finalize(endedAt: Date) async throws -> SessionRef?
+    /// セッションを閉じ、保存済みセッションへの参照を返す。begin していなければ nil。
+    /// reason は終わり方として保存する（失敗なら理由の文言も）
+    func finalize(endedAt: Date, reason: SessionEndReason) async throws -> SessionRef?
 }

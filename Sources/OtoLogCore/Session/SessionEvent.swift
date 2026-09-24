@@ -6,7 +6,9 @@ public enum SessionState: Sendable, Equatable {
     case idle
     case preparing
     case recording
+    /// 閉じている途中。停止と、保存先を確保した後の失敗は、閉じ終えるまでここを通る
     case stopping
+    /// 失敗で終わった。値はポップオーバーに出す理由
     case failed(String)
 }
 
@@ -44,8 +46,10 @@ public enum SessionEvent: Sendable, Equatable {
     case storeError(String)
     /// 翻訳失敗。原文だけが保存され、セッション自体は継続する
     case translationError(String)
-    /// 記録中のキャプチャの中断。再起動して続く場合も諦める場合も、中断のたびに1回流れる
+    /// 起動の途中か記録中のキャプチャの中断。再起動して続く場合も諦める場合も、中断のたびに1回流れる。
+    /// 起動の途中の中断もその時点で流れ、再起動は記録が始まってから行う
     case captureInterrupted(CaptureInterruption)
-    /// 停止完了（全セグメント保存済み）。タイトル生成やパイプラインの起点
+    /// 記録を閉じた（全セグメント保存済み）。タイトル生成やパイプラインの起点。
+    /// 停止では毎回、失敗では1件以上保存できたときだけ流れる
     case sessionFinished(SessionRef)
 }

@@ -45,10 +45,13 @@ swift run otolog-devtool ctl <status|start|stop>      # 起動中アプリの制
 - `OTOLOG_CLAUDE_DEBUG=1` で claude 呼び出しごとの診断ログを `$XDG_STATE_HOME/otolog/claude-logs/`（既定 `~/.local/state/...`）へ保存する。呼び出しタイムライン（`.log`: 引数・プロンプトサイズ・チャンク受信・終了/エラー）と claude CLI 内部ログ（`-cli.log`: API リクエスト・リトライ）の2ファイル1組。生成が進んでいるか・リトライで詰まっているかの切り分けに使う
   - GUI アプリで有効化する場合は `launchctl setenv OTOLOG_CLAUDE_DEBUG 1` してからアプリを再起動（戻すときは `unsetenv`）
 - 記録の経緯は設定なしで常に `$XDG_STATE_HOME/otolog/recording.log`（既定 `~/.local/state/...`）へ追記される。記録が止まった原因の切り分けに使う
-  - 1行に1件で、開始要求（経路・入力・認識ロケール）、状態遷移（failed は理由つき）、キャプチャの中断、保存と翻訳の失敗、完了したセッションのディレクトリ名を残す。発話の本文は書かない
+  - 1行に1件で、開始要求（経路・入力・認識ロケール）、状態遷移（failed は理由つき）、キャプチャの中断、保存と翻訳の失敗、閉じたセッションのディレクトリ名を残す。発話の本文は書かない
   - 同じ行を統合ログにも出す（`log show --last 1d --predicate 'subsystem == "com.bigdra50.OtoLog" AND category == "recording"'`）
   - キャプチャの中断には、止まった音源と、連続何回目の再起動か（`restart 1`）か諦めたこと（`giving up`）が付く
   - 同じ音源の再起動は連続3回まで。前回の再起動から1分以上動いていれば、次の中断は `restart 1` に戻る
+  - 開始の途中（`preparing`）の中断もその時点で残し、再起動は `recording` に入ってから行う。開始がそのまま失敗や停止で終わったときは、この再起動は行われない
+  - 保存先を確保した後に失敗すると、停止と同じく `stopping` を経てセッションを閉じてから `failed` になる。準備や保存先の確保での失敗は、閉じるものが無いので直接 `failed` になる
+  - 閉じたセッションの行（`session finished`）は、失敗では1件以上保存できたときだけ出る
 
     ```text
     2026-07-29T13:40:03.123+0900 [ERROR] capture interrupted: マイク (restart 1): 音声キャプチャデバイスが無効になりました（オーディオ構成の変更）。記録を再開してください。
@@ -56,7 +59,9 @@ swift run otolog-devtool ctl <status|start|stop>      # 起動中アプリの制
     2026-07-29T14:10:45.320+0900 [ERROR] capture interrupted: マイク (restart 2): 音声キャプチャデバイスが無効になりました（オーディオ構成の変更）。記録を再開してください。
     2026-07-29T14:10:46.518+0900 [ERROR] capture interrupted: マイク (restart 3): 音声キャプチャデバイスが無効になりました（オーディオ構成の変更）。記録を再開してください。
     2026-07-29T14:10:47.702+0900 [ERROR] capture interrupted: マイク (giving up): 音声キャプチャデバイスが無効になりました（オーディオ構成の変更）。記録を再開してください。
-    2026-07-29T14:10:47.713+0900 [ERROR] state: failed: マイク: 音声キャプチャデバイスが無効になりました（オーディオ構成の変更）。記録を再開してください。
+    2026-07-29T14:10:47.703+0900 [INFO] state: stopping
+    2026-07-29T14:10:48.915+0900 [INFO] session finished: 2026-07-29/1300
+    2026-07-29T14:10:48.916+0900 [ERROR] state: failed: マイク: 音声キャプチャデバイスが無効になりました（オーディオ構成の変更）。記録を再開してください。
     ```
 
 ## プロジェクト構成

@@ -12,6 +12,12 @@ final class FakeTranscriptionEngine: TranscriptionEngine, @unchecked Sendable {
     var progressScript: [Double] = []
     /// 呼び出し順の検証用フック
     var onFinish: (@Sendable () -> Void)?
+    /// prepare と start の先頭で待つ。記録の開始を途中で止めておくのに使う
+    var onPrepare: (@Sendable () async -> Void)?
+    var onStart: (@Sendable () async -> Void)?
+    /// finish でイベント列を閉じる前に流すイベント。
+    /// 実エンジンが言語の判定待ちで持っていたセグメントを finish で吐き出すのを再現する
+    var eventsOnFinish: [TranscriptEvent] = []
 
     var prepareCallCount: Int {
         lock.withLock { _prepareCallCount }
@@ -35,6 +41,7 @@ final class FakeTranscriptionEngine: TranscriptionEngine, @unchecked Sendable {
     }
 
     func prepare(locales: [Locale], onProgress: @escaping @Sendable (Double) -> Void) async throws -> AVAudioFormat {
+        await onPrepare?()
         lock.withLock {
             _prepareCallCount += 1
             _receivedLocales.append(locales)
@@ -50,6 +57,7 @@ final class FakeTranscriptionEngine: TranscriptionEngine, @unchecked Sendable {
         chunks: AsyncThrowingStream<AudioChunk, any Error>,
         context: TranscriptionContext
     ) async throws -> AsyncThrowingStream<TranscriptEvent, any Error> {
+        await onStart?()
         let (stream, continuation) = AsyncThrowingStream<TranscriptEvent, any Error>.makeStream()
         lock.withLock {
             eventContinuation = continuation
@@ -69,6 +77,9 @@ final class FakeTranscriptionEngine: TranscriptionEngine, @unchecked Sendable {
     func finish() async {
         lock.withLock { _finishCallCount += 1 }
         onFinish?()
+        for event in eventsOnFinish {
+            currentEventContinuation?.yield(event)
+        }
         currentEventContinuation?.finish()
     }
 
