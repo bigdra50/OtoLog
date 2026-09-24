@@ -206,15 +206,20 @@ public actor RecordingSession {
     }
 
     /// 起動途中の失敗や記録中の恒久障害で、動いているものをすべて畳む。
-    /// 片方の音源だけで録り続けると「揃った記録」に見えてしまうため、部分継続はしない
+    /// 片方の音源だけで録り続けると「揃った記録」に見えてしまうため、部分継続はしない。
+    ///
+    /// スロットはキャプチャを止める前に外す。畳んでいる間はまだ recording のままなので、
+    /// 止めたキャプチャのストリーム終了がスロットに届くと中断として再起動され、
+    /// 再起動の完了時には外し終えた配列を添字で引いて落ちる
     private func tearDownActiveFeeds() async {
-        for slot in activeFeeds {
+        let slots = activeFeeds
+        activeFeeds.removeAll()
+        for slot in slots {
             await slot.feed.capture.stop()
             slot.chunkContinuation?.finish()
             slot.forwardingTask?.cancel()
             slot.consumerTask?.cancel()
         }
-        activeFeeds.removeAll()
     }
 
     private func startCaptureAndForward(at index: Int) async throws {
@@ -247,7 +252,10 @@ public actor RecordingSession {
 
     /// スリープ復帰などの一過性障害を想定して、そのフィードだけを1回再起動する。2回目は failed
     private func attemptCaptureRestart(at index: Int, reason: String) async {
-        guard index < activeFeeds.count, activeFeeds[index].restartCount == 0 else {
+        // スロットが無いのは、外した後のキャプチャ（畳んでいる最中や前回の記録のもの）の終了が届いたとき。
+        // 中断ではないので何もしない。ここで failed にすると、無関係な理由の failed が本来の理由より先に流れる
+        guard index < activeFeeds.count else { return }
+        guard activeFeeds[index].restartCount == 0 else {
             await failSession(reason)
             return
         }

@@ -297,6 +297,22 @@ struct RecordingSessionTests {
         #expect(await eventually { sut.feedDoubles[0].capture.stopCallCount == 1 })
     }
 
+    /// 失敗で畳むときに止めた側のキャプチャの終了は中断ではない。再起動しない
+    @Test func tearDownAfterFailureDoesNotRestartTheOtherFeed() async {
+        let sut = await makeStartedSUT(kinds: [.system, .microphone])
+        sut.feedDoubles[1].capture.fail(Boom())
+        #expect(await eventually { sut.feedDoubles[1].capture.startCallCount == 2 })
+
+        sut.feedDoubles[1].capture.fail(Boom())
+
+        #expect(await eventually { sut.feedDoubles[0].capture.stopCallCount == 1 })
+        #expect(await eventually {
+            if case .failed = await sut.session.state { return true }
+            return false
+        })
+        #expect(sut.feedDoubles[0].capture.startCallCount == 1)
+    }
+
     // MARK: 翻訳
 
     /// 訳はセグメントへ載せてから保存する。ストアには訳つきの1件だけが渡る
