@@ -63,6 +63,9 @@ public actor RecordingSession {
     /// feeds の全フィードを同じセッション（同じ保存先）として起動する。
     /// どれか1つでも起動に失敗したら全体を failed にする（欠けた音源に気づかないまま録り続けない）。
     ///
+    /// 待っている間に stop() や失敗で閉じられたら、.recording に入らずに終える。
+    /// 閉じるのは閉じた側で、ここは待つ間に自分が起動したもの（閉じる側が知らないもの）だけを後始末する。
+    ///
     /// locales を複数渡すと、話されている言語を各エンジンが選ぶ。先頭は判定できなかったときの既定。
     ///
     /// makeTranslator はセグメントのロケールを受けて翻訳器を作る。自動検出では開始時点で
@@ -74,9 +77,12 @@ public actor RecordingSession {
         makeTranslator: (@Sendable (String) -> (any Translator)?)? = nil
     ) async {
         guard canStart, !feeds.isEmpty, let primary = locales.first else { return }
+        let run = UUID()
+        runID = run
         self.makeTranslator = makeTranslator
         translatorCache.removeAll()
         recordedSegmentCount = 0
+        storeBegin = nil
         setState(.preparing)
 
         let continuation = eventContinuation
@@ -90,9 +96,12 @@ public actor RecordingSession {
                 })
                 formats.append(format)
             } catch {
+                // 閉じられた後の失敗は、閉じた側が決めた終わり方を上書きしない
+                guard isPreparing(run) else { return }
                 setState(.failed(Self.failureReason(error.localizedDescription, from: feed.kind)))
                 return
             }
+            guard isPreparing(run) else { return }
         }
 
         // セッション識別子はここで発行し、全フィードの engine と store へ配る。
@@ -104,20 +113,26 @@ public actor RecordingSession {
             sessionStartedAt: now()
         )
 
+        // 確保の途中で閉じられても、閉じる側が確保の終わりを待ってから閉じられるよう Task で持つ
+        let begin = Task { [store] in try await store.begin(context: baseContext) }
+        storeBegin = begin
         do {
-            try await store.begin(context: baseContext)
+            try await begin.value
         } catch {
+            guard isPreparing(run) else { return }
             // 保存先の確保はどの音源にも属さないため、音源名は付けない
             setState(.failed(error.localizedDescription))
             return
         }
+        guard isPreparing(run) else { return }
 
         for (index, feed) in feeds.enumerated() {
             var context = baseContext
             context.source = feed.kind
             do {
-                try await activate(feed: feed, format: formats[index], context: context)
+                try await activate(feed: feed, format: formats[index], context: context, run: run)
             } catch {
+                guard isPreparing(run) else { return }
                 // 保存先は確保済みなので、起動したものを止めて空のセッションとして閉じる
                 await close(
                     .failed(Self.failureReason(error.localizedDescription, from: feed.kind)),
@@ -125,6 +140,7 @@ public actor RecordingSession {
                 )
                 return
             }
+            guard isPreparing(run) else { return }
         }
         setState(.recording)
     }
@@ -149,10 +165,11 @@ public actor RecordingSession {
         /// 連続して再起動した回数と、最後に再起動した時刻。数え直すかどうかは restartPolicy が決める
         var consecutiveRestarts = 0
         var lastRestartAt: Date?
-        /// 再起動がキャプチャを止めてから、中継を再開するか起動に失敗するまでの間 true。
-        /// この間キャプチャを止めるのも起動するのも再起動だけで、stop() と失敗の片付けは触れない。
+        /// キャプチャの起動か再起動がそのキャプチャを受け持っている間 true。起動は start がスロットを作ってから、
+        /// 再起動はキャプチャを止めるところから、どちらも中継を始めるか起動に失敗するまで続く。
+        /// この間キャプチャを止めるのも起動するのも受け持った側だけで、閉じる側（stop() と失敗の片付け）は触れない。
         /// 実キャプチャは掴んでいるものを確かめてから解放するため、同じキャプチャへの呼び出しが重なると同じものを二重に解放する
-        var isRestarting = false
+        var isStartingCapture = true
     }
 
     private let store: any TranscriptStore
@@ -170,12 +187,21 @@ public actor RecordingSession {
     private var activeFeeds: [FeedSlot] = []
     /// この記録で保存できたセグメントの数。失敗で閉じたときに完了を知らせるかどうかを決める
     private var recordedSegmentCount = 0
+    /// start ごとに振り直す記録の識別子。待ちから戻った start が、閉じられた後に始まった次の記録へ手を出さないようにする
+    private var runID = UUID()
+    /// この記録の保存先の確保。閉じる側は確保の途中なら終わるのを待ち、確保できていたときだけ閉じる
+    private var storeBegin: Task<Void, any Error>?
 
     private var canStart: Bool {
         switch state {
         case .idle, .failed: true
         case .preparing, .recording, .stopping: false
         }
+    }
+
+    /// 記録が閉じられていない（準備中か記録中）
+    private var isRunning: Bool {
+        state == .preparing || state == .recording
     }
 
     /// 音源に由来する失敗の理由へ音源名を付ける（「マイク: …」）。
@@ -189,11 +215,28 @@ public actor RecordingSession {
         eventContinuation.yield(.stateChanged(newState))
     }
 
+    /// run の start がまだ続けてよいか。閉じられた後や、次の記録が始まった後は false
+    private func isPreparing(_ run: UUID) -> Bool {
+        runID == run && state == .preparing
+    }
+
     /// エンジン起動 → スロット登録 → キャプチャ起動。スロットは capture.start の失敗時にも
     /// 積まれた状態で残し、呼び出し側の close で閉じさせる
-    private func activate(feed: RecordingFeed, format: AVAudioFormat, context: TranscriptionContext) async throws {
+    private func activate(
+        feed: RecordingFeed,
+        format: AVAudioFormat,
+        context: TranscriptionContext,
+        run: UUID
+    ) async throws {
         let (chunkStream, chunkContinuation) = AsyncThrowingStream<AudioChunk, any Error>.makeStream()
         let engineEvents = try await feed.engine.start(chunks: chunkStream, context: context)
+        guard isPreparing(run) else {
+            // エンジンを起動している間に閉じられた。閉じる側はスロットの無いこのエンジンを知らないため、ここで終わらせる。
+            // キャプチャは起動しておらず音声が届いていないので、受け取る結果は無い
+            chunkContinuation.finish()
+            await feed.engine.finish()
+            return
+        }
         var slot = FeedSlot(feed: feed, format: format, chunkContinuation: chunkContinuation)
         slot.consumerTask = makeConsumerTask(engineEvents, slotID: slot.id, source: feed.kind)
         activeFeeds.append(slot)
@@ -207,7 +250,7 @@ public actor RecordingSession {
     /// 最初に .stopping へ移った呼び出しだけが閉じる。後から来た停止や失敗は何もせずに戻り、終わり方は先に来た側で決まる。
     /// .stopping の後に終わったキャプチャのストリームは、中断として再起動されない。
     ///
-    /// 再起動の途中のキャプチャは、状態が変わったのを見た再起動が止める。ここからも止めると同じキャプチャへの呼び出しが重なる。
+    /// 起動や再起動の途中のキャプチャは、状態が変わったのを見た起動や再起動が止める。ここからも止めると同じキャプチャへの呼び出しが重なる。
     ///
     /// 失敗の片付けは、再起動を諦めたフィードの中継タスクや、失敗したエンジンの結果を受けるタスクの上で走る。
     /// 自分が走っているタスクの完走は待てない（待つと戻らない）ため、中継は待たず、結果を受けるタスクは自分のものを除いて待つ。
@@ -217,11 +260,11 @@ public actor RecordingSession {
         waitingForForwarding: Bool,
         runningOnConsumerOf currentSlotID: FeedSlot.ID? = nil
     ) async {
-        guard state == .preparing || state == .recording else { return }
+        guard isRunning else { return }
         setState(.stopping)
         let slots = activeFeeds
         activeFeeds.removeAll()
-        for slot in slots where !slot.isRestarting {
+        for slot in slots where !slot.isStartingCapture {
             await slot.feed.capture.stop()
         }
         if waitingForForwarding {
@@ -239,8 +282,7 @@ public actor RecordingSession {
         for slot in slots where slot.id != currentSlotID {
             await slot.consumerTask?.value
         }
-        // 全 append 完了後にセッションを閉じる。finalize 失敗は記録済みデータに影響しないため握る
-        let ref = try? await store.finalize(endedAt: now(), reason: reason)
+        let ref = await finalizeStore(reason)
         switch reason {
         case .stopped, .autoStopped:
             if let ref {
@@ -257,18 +299,38 @@ public actor RecordingSession {
         }
     }
 
+    /// 全 append 完了後に呼ぶ。保存先の確保の途中ならその終わりを待つ。
+    /// 確保していない（できなかった）記録には閉じるものが無い
+    private func finalizeStore(_ reason: SessionEndReason) async -> SessionRef? {
+        guard let storeBegin, case .success = await storeBegin.result else { return nil }
+        // finalize 失敗は記録済みデータに影響しないため握る
+        return try? await store.finalize(endedAt: now(), reason: reason)
+    }
+
     private func activeIndex(of slotID: FeedSlot.ID) -> Int? {
         activeFeeds.firstIndex { $0.id == slotID }
     }
 
     /// スロットのキャプチャを起動し、チャンクをそのフィードのエンジンへ中継する。
     /// 起動を待つ間に停止や失敗の片付けでスロットが外れていたら、起動したキャプチャを止めて中継しない。
-    /// 止めないと、誰も止めないキャプチャがデバイスを掴んだまま残る
+    /// 閉じる側は起動の途中のキャプチャに触れないため、止めないと誰も止めないキャプチャがデバイスを掴んだまま残る
     private func startCaptureAndForward(slotID: FeedSlot.ID) async throws {
         guard let index = activeIndex(of: slotID) else { return }
         let slot = activeFeeds[index]
-        let stream = try await slot.feed.capture.start(targetFormat: slot.format)
-        guard state == .preparing || state == .recording,
+        let stream: AsyncThrowingStream<AudioChunk, any Error>
+        do {
+            stream = try await slot.feed.capture.start(targetFormat: slot.format)
+        } catch {
+            // 起動できなかったキャプチャも、掴みかけたものを放すため止める。記録が続いていれば受け持ちを戻し、
+            // 止めるのは失敗の片付けか再起動のやり直しに任せる。閉じられた後なら止める側がいないので、ここで止める
+            if isRunning, let index = activeIndex(of: slotID) {
+                activeFeeds[index].isStartingCapture = false
+            } else {
+                await slot.feed.capture.stop()
+            }
+            throw error
+        }
+        guard isRunning,
               let index = activeIndex(of: slotID),
               let chunkContinuation = slot.chunkContinuation
         else {
@@ -277,7 +339,7 @@ public actor RecordingSession {
         }
         // 中継を始めたキャプチャは、再起動したものも stop() と失敗の片付けが止める。
         // 中継の開始と同じ区切りで受け持ちを戻し、止める側がいないキャプチャを作らない
-        activeFeeds[index].isRestarting = false
+        activeFeeds[index].isStartingCapture = false
         activeFeeds[index].forwardingTask = Task { [weak self] in
             do {
                 for try await chunk in stream {
@@ -311,7 +373,7 @@ public actor RecordingSession {
         // ここから中継を再開するまで、このキャプチャへの呼び出しは再起動だけが行う。
         // 止まったキャプチャが掴んでいるものを、待つ間も持ち続けないよう先に止める。
         // 1回の構成変更で中断の通知は続けて届くため、落ち着くのを待ってから再起動する
-        activeFeeds[index].isRestarting = true
+        activeFeeds[index].isStartingCapture = true
         await slot.feed.capture.stop()
         // 待ちが投げても（中継タスクのキャンセル）、続く確認で記録がまだ続いているかを見て決める
         try? await sleep(restartPolicy.settleDelay)
@@ -324,11 +386,9 @@ public actor RecordingSession {
             try await startCaptureAndForward(slotID: slotID)
         } catch {
             // 起動できなかったのも連続した中断の1回として数え、同じ手順でやり直すか諦める。
-            // 起動を待つ間（許可の確認など）に stableInterval が過ぎても数え直さないよう、時刻は失敗した時点に取り直す。
-            // 動いていないキャプチャの受け持ちは戻し、諦めて畳むときは他のフィードと同じく止めさせる
+            // 起動を待つ間（許可の確認など）に stableInterval が過ぎても数え直さないよう、時刻は失敗した時点に取り直す
             if let index = activeIndex(of: slotID) {
                 activeFeeds[index].lastRestartAt = now()
-                activeFeeds[index].isRestarting = false
             }
             await attemptCaptureRestart(slotID: slotID, reason: error.localizedDescription)
         }

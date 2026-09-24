@@ -21,8 +21,11 @@ actor SpyStore: TranscriptStore {
     /// 呼び出し順の検証用フック
     var onFinalize: (@Sendable () -> Void)?
     var onAppend: (@Sendable () -> Void)?
+    /// begin の先頭で待つ。保存先の確保を途中で止めておくのに使う
+    var onBegin: (@Sendable () async -> Void)?
 
-    func begin(context: TranscriptionContext) throws {
+    func begin(context: TranscriptionContext) async throws {
+        await onBegin?()
         if let beginError { throw beginError }
         beganContexts.append(context)
     }
@@ -54,6 +57,10 @@ actor SpyStore: TranscriptStore {
 
     func setOnAppend(_ hook: (@Sendable () -> Void)?) {
         onAppend = hook
+    }
+
+    func setOnBegin(_ hook: (@Sendable () async -> Void)?) {
+        onBegin = hook
     }
 
     func setFinalizeResult(_ ref: SessionRef?) {
