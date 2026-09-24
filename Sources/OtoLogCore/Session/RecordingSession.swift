@@ -36,13 +36,17 @@ public actor RecordingSession {
     public init(
         store: any TranscriptStore,
         translationTimeout: Duration = .seconds(10),
+        restartPolicy: CaptureRestartPolicy = .default,
         now: @escaping @Sendable () -> Date = { Date() },
-        makeSessionID: @escaping @Sendable () -> UUID = { UUID() }
+        makeSessionID: @escaping @Sendable () -> UUID = { UUID() },
+        sleep: @escaping @Sendable (Duration) async throws -> Void = { try await Task.sleep(for: $0) }
     ) {
         self.store = store
         self.translationTimeout = translationTimeout
+        self.restartPolicy = restartPolicy
         self.now = now
         self.makeSessionID = makeSessionID
+        self.sleep = sleep
         let (stream, continuation) = AsyncStream.makeStream(of: SessionEvent.self)
         events = stream
         eventContinuation = continuation
@@ -111,7 +115,7 @@ public actor RecordingSession {
             var context = baseContext
             context.source = feed.kind
             do {
-                try await activate(feed: feed, index: index, format: formats[index], context: context)
+                try await activate(feed: feed, format: formats[index], context: context)
             } catch {
                 await tearDownActiveFeeds()
                 setState(.failed(Self.failureReason(error.localizedDescription, from: feed.kind)))
@@ -151,19 +155,26 @@ public actor RecordingSession {
     // MARK: Private
 
     /// 起動済みフィードの実行時状態。forwardingTask は再起動で差し替わる
-    private struct FeedSlot {
+    private struct FeedSlot: Identifiable {
+        /// 待ちから戻った再起動が、同じスロットがまだ記録中かを確かめるための識別子。
+        /// 添字では、畳んだ後に始まった次の記録のスロットと区別できない
+        let id = UUID()
         let feed: RecordingFeed
         let format: AVAudioFormat
         var chunkContinuation: AsyncThrowingStream<AudioChunk, any Error>.Continuation?
         var forwardingTask: Task<Void, Never>?
         var consumerTask: Task<Void, Never>?
-        var restartCount = 0
+        /// 連続して再起動した回数と、最後に再起動した時刻。数え直すかどうかは restartPolicy が決める
+        var consecutiveRestarts = 0
+        var lastRestartAt: Date?
     }
 
     private let store: any TranscriptStore
     private let translationTimeout: Duration
+    private let restartPolicy: CaptureRestartPolicy
     private let now: @Sendable () -> Date
     private let makeSessionID: @Sendable () -> UUID
+    private let sleep: @Sendable (Duration) async throws -> Void
     private nonisolated let eventContinuation: AsyncStream<SessionEvent>.Continuation
 
     /// start で受け取った翻訳器の生成手段。記録中は差し替わらない
@@ -201,23 +212,20 @@ public actor RecordingSession {
 
     /// エンジン起動 → スロット登録 → キャプチャ起動。スロットは capture.start の失敗時にも
     /// 積まれた状態で残し、呼び出し側の tearDownActiveFeeds で畳ませる
-    private func activate(
-        feed: RecordingFeed, index: Int, format: AVAudioFormat, context: TranscriptionContext
-    ) async throws {
+    private func activate(feed: RecordingFeed, format: AVAudioFormat, context: TranscriptionContext) async throws {
         let (chunkStream, chunkContinuation) = AsyncThrowingStream<AudioChunk, any Error>.makeStream()
         let engineEvents = try await feed.engine.start(chunks: chunkStream, context: context)
         var slot = FeedSlot(feed: feed, format: format, chunkContinuation: chunkContinuation)
         slot.consumerTask = makeConsumerTask(engineEvents, source: feed.kind)
         activeFeeds.append(slot)
-        try await startCaptureAndForward(at: index)
+        try await startCaptureAndForward(slotID: slot.id)
     }
 
     /// 起動途中の失敗や記録中の恒久障害で、動いているものをすべて畳む。
     /// 片方の音源だけで録り続けると「揃った記録」に見えてしまうため、部分継続はしない。
     ///
     /// スロットはキャプチャを止める前に外す。畳んでいる間はまだ recording のままなので、
-    /// 止めたキャプチャのストリーム終了がスロットに届くと中断として再起動され、
-    /// 再起動の完了時には外し終えた配列を添字で引いて落ちる
+    /// 止めたキャプチャのストリーム終了がスロットに届くと、中断として再起動されてしまう
     private func tearDownActiveFeeds() async {
         let slots = activeFeeds
         activeFeeds.removeAll()
@@ -229,54 +237,74 @@ public actor RecordingSession {
         }
     }
 
-    private func startCaptureAndForward(at index: Int) async throws {
+    private func activeIndex(of slotID: FeedSlot.ID) -> Int? {
+        activeFeeds.firstIndex { $0.id == slotID }
+    }
+
+    /// スロットのキャプチャを起動し、チャンクをそのフィードのエンジンへ中継する。
+    /// 起動を待つ間に停止や失敗の片付けでスロットが外れていたら、起動したキャプチャを止めて中継しない。
+    /// 止めないと、誰も止めないキャプチャがデバイスを掴んだまま残る
+    private func startCaptureAndForward(slotID: FeedSlot.ID) async throws {
+        guard let index = activeIndex(of: slotID) else { return }
         let slot = activeFeeds[index]
         let stream = try await slot.feed.capture.start(targetFormat: slot.format)
-        guard let chunkContinuation = slot.chunkContinuation else { return }
+        guard state == .preparing || state == .recording,
+              let index = activeIndex(of: slotID),
+              let chunkContinuation = slot.chunkContinuation
+        else {
+            await slot.feed.capture.stop()
+            return
+        }
         activeFeeds[index].forwardingTask = Task { [weak self] in
             do {
                 for try await chunk in stream {
                     chunkContinuation.yield(chunk)
                 }
-                await self?.captureStreamEnded(at: index)
+                await self?.attemptCaptureRestart(slotID: slotID, reason: "capture stream ended unexpectedly")
             } catch {
-                await self?.captureStreamFailed(at: index, error)
+                await self?.attemptCaptureRestart(slotID: slotID, reason: error.localizedDescription)
             }
         }
     }
 
-    private func captureStreamEnded(at index: Int) async {
-        // stop() 経由の正常終了は .stopping で来る。録音中の無通告終了は障害として扱う
-        if state == .recording {
-            await attemptCaptureRestart(at: index, reason: "capture stream ended unexpectedly")
-        }
-    }
-
-    private func captureStreamFailed(at index: Int, _ error: any Error) async {
-        guard state == .recording else { return }
-        await attemptCaptureRestart(at: index, reason: error.localizedDescription)
-    }
-
-    /// スリープ復帰などの一過性障害を想定して、そのフィードだけを1回再起動する。2回目は failed。
+    /// スリープ復帰や音声構成の変更による一過性の中断を想定して、そのフィードのキャプチャだけを再起動する。
+    /// 何回まで続けて再起動するか、いつ数え直すかは restartPolicy が決める。
     /// 中断は再起動するかどうかにかかわらず毎回 captureInterrupted で流す
-    private func attemptCaptureRestart(at index: Int, reason: String) async {
-        // スロットが無いのは、外した後のキャプチャ（畳んでいる最中や前回の記録のもの）の終了が届いたとき。
-        // 中断ではないので何もしない。ここで failed にすると、無関係な理由の failed が本来の理由より先に流れる
-        guard index < activeFeeds.count else { return }
-        let source = activeFeeds[index].feed.kind
-        guard activeFeeds[index].restartCount == 0 else {
-            await giveUpCapture(source: source, reason: reason)
+    private func attemptCaptureRestart(slotID: FeedSlot.ID, reason: String) async {
+        // stop() 経由の正常終了は .stopping で来る。スロットが無いのは、外した後のキャプチャ
+        // （畳んでいる最中や前回の記録のもの）の終了が届いたとき。どちらも中断ではないので何もしない。
+        // ここで failed にすると、無関係な理由の failed が本来の理由より先に流れる
+        guard state == .recording, let index = activeIndex(of: slotID) else { return }
+        let slot = activeFeeds[index]
+        let decision = restartPolicy.decision(
+            consecutiveRestarts: slot.consecutiveRestarts, lastRestartAt: slot.lastRestartAt, now: now()
+        )
+        guard case let .restart(attempt) = decision else {
+            await giveUpCapture(source: slot.feed.kind, reason: reason)
             return
         }
-        activeFeeds[index].restartCount += 1
         eventContinuation.yield(.captureInterrupted(CaptureInterruption(
-            source: source, reason: reason, restartAttempt: activeFeeds[index].restartCount
+            source: slot.feed.kind, reason: reason, restartAttempt: attempt
         )))
+        // 止まったキャプチャが掴んでいるものを、待つ間も持ち続けないよう先に止める。
+        // 1回の構成変更で中断の通知は続けて届くため、落ち着くのを待ってから再起動する
+        await slot.feed.capture.stop()
         do {
-            try await startCaptureAndForward(at: index)
+            try await sleep(restartPolicy.settleDelay)
         } catch {
-            // 再起動できなかったことも中断として流す。同じ音源をもう一度再起動する規則は無いため諦める
-            await giveUpCapture(source: source, reason: error.localizedDescription)
+            // 待ちが投げるのは、失敗の片付けで forwarding ごとキャンセルされたとき
+            return
+        }
+        // actor は再入するため、待つ間に stop や失敗の片付けが走り、次の記録が始まっていることもある
+        guard state == .recording, let index = activeIndex(of: slotID) else { return }
+        // 時刻は起動の直前に取る。数え直しは、再起動してから動いた時間で決めるため
+        activeFeeds[index].consecutiveRestarts = attempt
+        activeFeeds[index].lastRestartAt = now()
+        do {
+            try await startCaptureAndForward(slotID: slotID)
+        } catch {
+            // 起動できなかったのも連続した中断の1回として数え、同じ手順でやり直すか諦める
+            await attemptCaptureRestart(slotID: slotID, reason: error.localizedDescription)
         }
     }
 

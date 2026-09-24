@@ -44,6 +44,37 @@ struct TestDoubleTests {
         }
     }
 
+    /// 順に投げるエラーを使い切ったら、次の start は成功する
+    @Test func fakeCaptureSourceThrowsQueuedStartErrorsInOrder() async throws {
+        struct First: Error {}
+        struct Second: Error {}
+        let source = FakeCaptureSource()
+        source.startErrors = [First(), Second()]
+
+        await #expect(throws: First.self) { _ = try await source.start(targetFormat: format) }
+        await #expect(throws: Second.self) { _ = try await source.start(targetFormat: format) }
+        _ = try await source.start(targetFormat: format)
+
+        #expect(source.startCallCount == 3)
+        #expect(source.startErrors.isEmpty)
+    }
+
+    /// hold 中は release まで戻らない。release 後の呼び出しは待たずに戻る
+    @Test func manualSleepHoldsCallersUntilReleased() async {
+        let sleep = ManualSleep(holding: true)
+        let held = Task { await sleep.sleep(for: .seconds(1)) }
+        #expect(await eventually { sleep.waitingCount == 1 })
+        #expect(sleep.returnedCount == 0)
+
+        sleep.release()
+        await held.value
+        await sleep.sleep(for: .milliseconds(5))
+
+        #expect(sleep.returnedCount == 2)
+        #expect(sleep.waitingCount == 0)
+        #expect(sleep.requestedDurations == [.seconds(1), .milliseconds(5)])
+    }
+
     @Test func spyStoreRecordsAndCanThrow() async throws {
         struct DiskFull: Error {}
         let store = SpyStore()

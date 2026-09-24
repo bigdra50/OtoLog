@@ -152,19 +152,6 @@ struct RecordingSessionTests {
         #expect(await eventually { sut.engine.consumedChunkCount == 1 })
     }
 
-    @Test func secondCaptureFailureLeadsToFailed() async {
-        let sut = await makeStartedSUT()
-
-        sut.capture.fail(Boom())
-        #expect(await eventually { sut.capture.startCallCount == 2 })
-
-        sut.capture.fail(Boom())
-        #expect(await eventually {
-            if case .failed = await sut.session.state { return true }
-            return false
-        })
-    }
-
     @Test func storeErrorKeepsSessionRecording() async {
         struct DiskFull: Error {}
         let sut = await makeStartedSUT()
@@ -308,7 +295,7 @@ struct RecordingSessionTests {
 
     /// 失敗で畳むときに止めた側のキャプチャの終了は中断ではない。再起動も中断の通知もしない
     @Test func tearDownAfterFailureDoesNotRestartTheOtherFeed() async {
-        let sut = await makeStartedSUT(kinds: [.system, .microphone])
+        let sut = await makeStartedSUT(kinds: [.system, .microphone], restartPolicy: singleRestart)
         sut.feedDoubles[1].capture.fail(Described(message: "1回目"))
         #expect(await eventually { sut.feedDoubles[1].capture.startCallCount == 2 })
 
@@ -340,8 +327,8 @@ struct RecordingSessionTests {
     }
 
     /// 再起動を諦めるときは restartAttempt なしで流し、続く failed の理由には音源名を付ける
-    @Test func secondCaptureFailureReportsGiveUpAndNamesTheFeed() async throws {
-        let sut = await makeStartedSUT(kinds: [.system, .microphone])
+    @Test func interruptionBeyondRestartLimitReportsGiveUpAndNamesTheFeed() async throws {
+        let sut = await makeStartedSUT(kinds: [.system, .microphone], restartPolicy: singleRestart)
         sut.feedDoubles[1].capture.fail(Described(message: "1回目"))
         #expect(await eventually { sut.feedDoubles[1].capture.startCallCount == 2 })
 
@@ -355,24 +342,6 @@ struct RecordingSessionTests {
         ))))
         let failedIndex = try #require(events.firstIndex(of: failed))
         #expect(giveUpIndex < failedIndex)
-    }
-
-    /// 再起動そのものが失敗したら、その理由で諦めたことを流してから failed にする
-    @Test func failedRestartReportsGiveUpWithStartError() async {
-        let sut = await makeStartedSUT()
-        sut.capture.errorOnStart = Described(message: "起動できない")
-
-        sut.capture.fail(Described(message: "止まった"))
-
-        #expect(await eventually {
-            sut.collector.events.contains(.stateChanged(.failed("システム音声: 起動できない")))
-        })
-        #expect(sut.collector.events.contains(.captureInterrupted(CaptureInterruption(
-            source: .system, reason: "止まった", restartAttempt: 1
-        ))))
-        #expect(sut.collector.events.contains(.captureInterrupted(CaptureInterruption(
-            source: .system, reason: "起動できない", restartAttempt: nil
-        ))))
     }
 
     /// 停止に伴うキャプチャの終了は中断ではない
@@ -420,6 +389,165 @@ struct RecordingSessionTests {
         await sut.session.start(feeds: sut.feeds, locales: [ja])
 
         #expect(await sut.session.state == .failed("保存先に書けない"))
+    }
+
+    // MARK: 再起動の方針（連続した中断の数え方と手順）
+
+    /// 長時間の記録では中断が時間をおいて何度も起きる。間に stableInterval 以上動いていれば、
+    /// 何度目の中断でも1回目として再起動し、記録を続ける
+    @Test func interruptionsSpacedBeyondStableIntervalNeverFailTheSession() async {
+        let clock = TestClock()
+        let sut = await makeStartedSUT(now: { clock.now })
+
+        for count in 1...5 {
+            sut.capture.fail(Described(message: "\(count)回目"))
+            #expect(await eventually { sut.capture.startCallCount == count + 1 })
+            clock.advance(by: CaptureRestartPolicy.default.stableInterval)
+        }
+
+        #expect(await eventually { restartAttempts(in: sut.collector.events) == [1, 1, 1, 1, 1] })
+        #expect(await sut.session.state == .recording)
+    }
+
+    /// 立て続けの中断は連続として数え、上限を超えたら諦める
+    @Test func consecutiveInterruptionsFailAfterMaxRestarts() async {
+        let clock = TestClock()
+        let sut = await makeStartedSUT(now: { clock.now })
+
+        for count in 1...3 {
+            sut.capture.fail(Described(message: "\(count)回目"))
+            #expect(await eventually { sut.capture.startCallCount == count + 1 })
+        }
+        sut.capture.fail(Described(message: "4回目"))
+
+        #expect(await eventually { await sut.session.state == .failed("システム音声: 4回目") })
+        #expect(await eventually { restartAttempts(in: sut.collector.events) == [1, 2, 3, nil] })
+        #expect(sut.capture.startCallCount == 4)
+    }
+
+    /// 止めずに起動し直すと前回のタップやエンジンが残る。止めて、待ってから起動する
+    @Test func restartStopsTheCaptureAndSettlesBeforeStartingItAgain() async {
+        let order = OrderLog()
+        let sleep = ManualSleep()
+        let sut = await makeStartedSUT(sleep: { duration in
+            order.append("sleep")
+            await sleep.sleep(for: duration)
+        })
+        sut.capture.onStop = { order.append("capture.stop") }
+        sut.capture.onStart = { order.append("capture.start") }
+
+        sut.capture.fail(Boom())
+
+        #expect(await eventually { sut.capture.startCallCount == 2 })
+        #expect(order.entries == ["capture.stop", "sleep", "capture.start"])
+        #expect(sleep.requestedDurations == [CaptureRestartPolicy.default.settleDelay])
+    }
+
+    /// 待つ間に停止されたら再起動しない。記録は失敗扱いにせず、そのまま閉じる
+    @Test func stopDuringSettleDelayFinishesWithoutRestarting() async {
+        let sleep = ManualSleep(holding: true)
+        let sut = await makeStartedSUT(sleep: { await sleep.sleep(for: $0) })
+        sut.capture.fail(Boom())
+        #expect(await eventually { sleep.waitingCount == 1 })
+
+        // 停止は待っている再起動が抜けるのを待つため、別タスクで始めてから待ちを解く
+        let stopping = Task { await sut.session.stop() }
+        #expect(await eventually { await sut.session.state == .stopping })
+        sleep.release()
+        await stopping.value
+
+        #expect(await sut.session.state == .idle)
+        #expect(sut.capture.startCallCount == 1)
+        #expect(await sut.store.finalizedAts.count == 1)
+        #expect(await eventually {
+            sut.collector.events.contains { if case .sessionFinished = $0 { true } else { false } }
+        })
+        #expect(!sut.collector.events.contains { if case .stateChanged(.failed) = $0 { true } else { false } })
+    }
+
+    /// 再起動の start を待つ間に停止されたら、起動し終えたキャプチャを止めてから抜ける。
+    /// 中継しないキャプチャが動き続けると、記録を止めた後もデバイスを掴んだまま残る
+    @Test func stopWhileRestartedCaptureIsStartingLeavesNoCaptureRunning() async {
+        let gate = ManualSleep(holding: true)
+        let sut = await makeStartedSUT()
+        sut.capture.onStart = { await gate.sleep(for: .zero) }
+        sut.capture.fail(Boom())
+        #expect(await eventually { gate.waitingCount == 1 })
+
+        let stopping = Task { await sut.session.stop() }
+        #expect(await eventually { await sut.session.state == .stopping })
+        gate.release()
+        await stopping.value
+
+        #expect(await sut.session.state == .idle)
+        #expect(sut.capture.startCallCount == 2)
+        #expect(!sut.capture.isCapturing)
+    }
+
+    /// 待つ間に記録が失敗で畳まれ、次の記録が始まっていたら、古い再起動は新しい記録のキャプチャに触れない
+    @Test func restartSkipsWhenANewerSessionStartedDuringSettleDelay() async {
+        let sleep = ManualSleep(holding: true)
+        let sut = await makeStartedSUT(sleep: { await sleep.sleep(for: $0) })
+        sut.capture.fail(Described(message: "止まった"))
+        #expect(await eventually { sleep.waitingCount == 1 })
+        sut.engine.failEvents(Described(message: "認識が止まった"))
+        #expect(await eventually { await sut.session.state == .failed("システム音声: 認識が止まった") })
+        let next = FeedDoubles(capture: FakeCaptureSource(), engine: FakeTranscriptionEngine(), kind: .system)
+        await sut.session.start(feeds: [next.feed], locales: [ja])
+        #expect(await sut.session.state == .recording)
+
+        sleep.release()
+
+        // 待ち明けの確認は actor 上で終わり、外からその終わりを待つ手段は無い。待ちから戻ったのを見てから確かめる。
+        // 正しく抜けていれば、確かめる時期によらず何も起きていない
+        #expect(await eventually { sleep.returnedCount == 1 })
+        #expect(await sut.session.state == .recording)
+        #expect(next.capture.startCallCount == 1)
+        #expect(sut.capture.startCallCount == 1)
+    }
+
+    /// 再起動の start が投げたら、それも連続した中断の1回として数え、同じ手順（止める → 待つ → 起動する）でやり直す
+    @Test func restartWhoseStartThrowsCountsAsNextConsecutiveInterruption() async {
+        let order = OrderLog()
+        let sut = await makeStartedSUT(sleep: { _ in order.append("sleep") })
+        sut.capture.onStop = { order.append("capture.stop") }
+        sut.capture.onStart = { order.append("capture.start") }
+        sut.capture.startErrors = [Described(message: "起動できない")]
+
+        sut.capture.fail(Described(message: "止まった"))
+
+        #expect(await eventually { sut.capture.startCallCount == 3 })
+        #expect(await sut.session.state == .recording)
+        #expect(order.entries == [
+            "capture.stop", "sleep", "capture.start",
+            "capture.stop", "sleep", "capture.start",
+        ])
+        #expect(await eventually {
+            interruptions(in: sut.collector.events) == [
+                CaptureInterruption(source: .system, reason: "止まった", restartAttempt: 1),
+                CaptureInterruption(source: .system, reason: "起動できない", restartAttempt: 2),
+            ]
+        })
+    }
+
+    /// 再起動できないまま上限に達したら、最後の起動エラーを理由に諦める
+    @Test func restartsThatKeepFailingToStartGiveUpWithTheStartError() async {
+        var policy = CaptureRestartPolicy.default
+        policy.maxConsecutiveRestarts = 2
+        let sut = await makeStartedSUT(restartPolicy: policy)
+        sut.capture.errorOnStart = Described(message: "起動できない")
+
+        sut.capture.fail(Described(message: "止まった"))
+
+        #expect(await eventually { await sut.session.state == .failed("システム音声: 起動できない") })
+        #expect(await eventually {
+            interruptions(in: sut.collector.events) == [
+                CaptureInterruption(source: .system, reason: "止まった", restartAttempt: 1),
+                CaptureInterruption(source: .system, reason: "起動できない", restartAttempt: 2),
+                CaptureInterruption(source: .system, reason: "起動できない", restartAttempt: nil),
+            ]
+        })
+        #expect(sut.capture.startCallCount == 3)
     }
 
     // MARK: 翻訳
@@ -488,6 +616,10 @@ struct RecordingSessionTests {
         let capture: FakeCaptureSource
         let engine: FakeTranscriptionEngine
         let kind: AudioSourceKind
+
+        var feed: RecordingFeed {
+            RecordingFeed(capture: capture, engine: engine, kind: kind)
+        }
     }
 
     private struct SUT {
@@ -506,7 +638,7 @@ struct RecordingSessionTests {
         }
 
         var feeds: [RecordingFeed] {
-            feedDoubles.map { RecordingFeed(capture: $0.capture, engine: $0.engine, kind: $0.kind) }
+            feedDoubles.map(\.feed)
         }
     }
 
@@ -514,11 +646,21 @@ struct RecordingSessionTests {
         Locale(identifier: "ja-JP")
     }
 
+    /// 2回目の連続した中断で諦める方針。諦めた後の振る舞いを短い手順で確かめるため
+    private var singleRestart: CaptureRestartPolicy {
+        var policy = CaptureRestartPolicy.default
+        policy.maxConsecutiveRestarts = 1
+        return policy
+    }
+
+    /// sleep の既定は待たずに戻る。再起動を含むテストが実時間の settleDelay を待たないように
     private func makeSUT(
         kinds: [AudioSourceKind] = [.system],
         now: @escaping @Sendable () -> Date = { Date() },
         makeSessionID: @escaping @Sendable () -> UUID = { UUID() },
-        translationTimeout: Duration = .seconds(10)
+        translationTimeout: Duration = .seconds(10),
+        restartPolicy: CaptureRestartPolicy = .default,
+        sleep: @escaping @Sendable (Duration) async throws -> Void = { _ in }
     ) -> SUT {
         let feedDoubles = kinds.map {
             FeedDoubles(capture: FakeCaptureSource(), engine: FakeTranscriptionEngine(), kind: $0)
@@ -527,7 +669,9 @@ struct RecordingSessionTests {
         let session = RecordingSession(
             store: store,
             translationTimeout: translationTimeout,
-            now: now, makeSessionID: makeSessionID
+            restartPolicy: restartPolicy,
+            now: now, makeSessionID: makeSessionID,
+            sleep: sleep
         )
         let collector = EventCollector()
         collector.attach(to: session.events)
@@ -538,9 +682,14 @@ struct RecordingSessionTests {
         kinds: [AudioSourceKind] = [.system],
         now: @escaping @Sendable () -> Date = { Date() },
         translator: (any Translator)? = nil,
-        translationTimeout: Duration = .seconds(10)
+        translationTimeout: Duration = .seconds(10),
+        restartPolicy: CaptureRestartPolicy = .default,
+        sleep: @escaping @Sendable (Duration) async throws -> Void = { _ in }
     ) async -> SUT {
-        let sut = makeSUT(kinds: kinds, now: now, translationTimeout: translationTimeout)
+        let sut = makeSUT(
+            kinds: kinds, now: now, translationTimeout: translationTimeout,
+            restartPolicy: restartPolicy, sleep: sleep
+        )
         // 翻訳器はロケールごとに引かれる。テストではどのロケールでも同じものを返す
         var factory: (@Sendable (String) -> (any Translator)?)?
         if let translator {
@@ -549,5 +698,15 @@ struct RecordingSessionTests {
         await sut.session.start(feeds: sut.feeds, locales: [ja], makeTranslator: factory)
         _ = await eventually { await sut.session.state == .recording }
         return sut
+    }
+
+    private func interruptions(in events: [SessionEvent]) -> [CaptureInterruption] {
+        events.compactMap { event -> CaptureInterruption? in
+            if case let .captureInterrupted(interruption) = event { interruption } else { nil }
+        }
+    }
+
+    private func restartAttempts(in events: [SessionEvent]) -> [Int?] {
+        interruptions(in: events).map(\.restartAttempt)
     }
 }
