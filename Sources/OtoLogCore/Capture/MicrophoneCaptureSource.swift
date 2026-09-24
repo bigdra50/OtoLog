@@ -19,6 +19,9 @@ public final class MicrophoneCaptureSource: AudioCaptureSource, @unchecked Senda
     // MARK: Public
 
     public func start(targetFormat: AVAudioFormat) async throws -> AsyncThrowingStream<AudioChunk, any Error> {
+        // stop を経ずに起動し直されても、前回のエンジン・タップ・構成変更の監視を残さない。
+        // 残ったエンジンは入力デバイスを掴んだまま動き続ける
+        await stop()
         // 初回はここで TCC のマイク許可ダイアログが出る（Info.plist の NSMicrophoneUsageDescription 必須）
         guard await AVCaptureDevice.requestAccess(for: .audio) else {
             throw CaptureError.microphonePermissionDenied
@@ -53,11 +56,12 @@ public final class MicrophoneCaptureSource: AudioCaptureSource, @unchecked Senda
                 currentContinuation?.yield(AudioChunk(buffer: owned))
             }
         }
-        // デバイス抜去・入出力構成の変更は一過性障害としてセッション側の再起動に委ねる
+        // デバイス抜去・入出力構成の変更は一過性障害としてセッション側の再起動に委ねる。
+        // 終わらせるのはこの start のストリームに限る。外すのと行き違いに届いた通知が、次の start のストリームを終わらせないように
         observer = NotificationCenter.default.addObserver(
             forName: .AVAudioEngineConfigurationChange, object: engine, queue: nil
-        ) { [weak self] _ in
-            self?.currentContinuation?.finish(throwing: CaptureError.captureDeviceInvalidated)
+        ) { _ in
+            continuation.finish(throwing: CaptureError.captureDeviceInvalidated)
         }
 
         engine.prepare()
