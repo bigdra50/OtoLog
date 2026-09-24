@@ -53,6 +53,7 @@ swift run otolog-devtool ctl <status|start|stop>      # 起動中アプリの制
   - 開始の途中（`preparing`）の中断もその時点で残し、再起動は `recording` に入ってから行う。開始がそのまま失敗や停止で終わったときは、この再起動は行われない
   - 保存先を確保した後に失敗すると、停止と同じく `stopping` を経てセッションを閉じてから `failed` になる。準備や保存先の確保での失敗は、閉じるものが無いので直接 `failed` になる
   - 閉じたセッションの行（`session finished`）は、失敗では1件以上保存できたときだけ出る
+  - 閉じるときに meta.json を書けなかったときは `store error: 記録を閉じられませんでした: …` が出て、`session finished` は出ない。保存済みの発話は残るが、meta.json に終了時刻が無く、停止後の自動処理も走らない
   - 無音で自動停止したときは、無音の長さを付けた行（`auto-stopped: silence for 30m`）の後に、停止と同じく `stopping`・`session finished`・`idle` が続く
 
     ```text
