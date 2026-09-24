@@ -11,13 +11,15 @@ import OtoLogCore
         store: SessionFileStore,
         state: AppState,
         settings: AppSettings,
-        overlay: SubtitleOverlayController = SubtitleOverlayController()
+        overlay: SubtitleOverlayController = SubtitleOverlayController(),
+        recordingLog: RecordingLog = RecordingLog()
     ) {
         self.session = session
         self.store = store
         self.state = state
         self.settings = settings
         self.overlay = overlay
+        self.recordingLog = recordingLog
     }
 
     // MARK: Internal
@@ -45,10 +47,12 @@ import OtoLogCore
         let locales = recognitionLocales()
         let makeTranslator = translatorFactory()
         let feeds = makeFeeds()
-        Task { [session, state] in
+        let startRequest = startRequestEntry(via: .popover)
+        Task { [session, state, recordingLog] in
             if state.isRecording {
                 await session.stop()
             } else {
+                recordingLog.record(startRequest)
                 await session.start(feeds: feeds, locales: locales, makeTranslator: makeTranslator)
             }
         }
@@ -129,6 +133,7 @@ import OtoLogCore
                 state: Self.describe(before), sessionPath: latestSessionPath()
             )
         }
+        recordingLog.record(startRequestEntry(via: .control))
         await session.start(
             feeds: makeFeeds(), locales: recognitionLocales(), makeTranslator: translatorFactory()
         )
@@ -162,6 +167,7 @@ import OtoLogCore
     private let state: AppState
     private let settings: AppSettings
     private let overlay: SubtitleOverlayController
+    private let recordingLog: RecordingLog
     private var eventTask: Task<Void, Never>?
 
     private static func describe(_ state: SessionState) -> String {
@@ -181,6 +187,12 @@ import OtoLogCore
 
     private func recognitionLocales() -> [Locale] {
         settings.resolvedRecognitionLocales.map { Locale(identifier: $0) }
+    }
+
+    private func startRequestEntry(via origin: RecordingLog.StartOrigin) -> RecordingLog.Entry {
+        .startRequested(
+            via: origin, inputMode: settings.audioInputMode, locales: settings.resolvedRecognitionLocales
+        )
     }
 
     /// 設定の入力モードからフィード（キャプチャ + エンジンの対）を組む。
@@ -221,6 +233,9 @@ import OtoLogCore
     }
 
     private func apply(_ event: SessionEvent) {
+        if let entry = RecordingLog.Entry(event: event) {
+            recordingLog.record(entry)
+        }
         switch event {
         case let .stateChanged(sessionState):
             state.sessionState = sessionState
