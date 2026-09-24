@@ -1230,17 +1230,15 @@ struct RecordingSessionTests {
         #expect(await sut.store.finalizedReasons == [.autoStopped])
     }
 
-    /// 見張りは既定で15秒ごとに確かめる。止めるのは無音が timeout に達してから最大15秒遅れる
-    @Test func watchdogChecksEveryFifteenSecondsByDefault() async {
+    /// 見張りは15秒ごとに確かめる。止めるのは無音が timeout に達してから最大15秒遅れる
+    @Test func watchdogChecksEveryFifteenSeconds() async {
         let watchdog = ManualSleep(holding: true)
-        let feed = FeedDoubles(capture: FakeCaptureSource(), engine: FakeTranscriptionEngine(), kind: .system)
-        let session = RecordingSession(store: SpyStore(), sleep: { await watchdog.sleep(for: $0) })
 
-        await session.start(feeds: [feed.feed], locales: [ja], silenceTimeout: .seconds(60))
+        let sut = await makeStartedSUT(sleep: { await watchdog.sleep(for: $0) }, silenceTimeout: .seconds(60))
 
         #expect(await eventually { watchdog.waitingCount == 1 })
         #expect(watchdog.requestedDurations == [.seconds(15)])
-        await session.stop()
+        await sut.session.stop()
         watchdog.release()
     }
 
@@ -1248,9 +1246,7 @@ struct RecordingSessionTests {
     @Test func watchdogChecksAtTheTimeoutWhenItIsShorterThanTheCheckInterval() async {
         let watchdog = ManualSleep(holding: true)
 
-        let sut = await makeStartedSUT(
-            silenceCheckInterval: .seconds(15), sleep: { await watchdog.sleep(for: $0) }, silenceTimeout: .seconds(10)
-        )
+        let sut = await makeStartedSUT(sleep: { await watchdog.sleep(for: $0) }, silenceTimeout: .seconds(10))
 
         #expect(await eventually { watchdog.waitingCount == 1 })
         #expect(watchdog.requestedDurations == [.seconds(10)])
@@ -1369,7 +1365,6 @@ struct RecordingSessionTests {
         makeSessionID: @escaping @Sendable () -> UUID = { UUID() },
         translationTimeout: Duration = .seconds(10),
         restartPolicy: CaptureRestartPolicy = .default,
-        silenceCheckInterval: Duration = .seconds(15),
         sleep: @escaping @Sendable (Duration) async throws -> Void = { _ in }
     ) -> SUT {
         let feedDoubles = kinds.map {
@@ -1380,7 +1375,6 @@ struct RecordingSessionTests {
             store: store,
             translationTimeout: translationTimeout,
             restartPolicy: restartPolicy,
-            silenceCheckInterval: silenceCheckInterval,
             now: now, makeSessionID: makeSessionID,
             sleep: sleep
         )
@@ -1395,13 +1389,12 @@ struct RecordingSessionTests {
         translator: (any Translator)? = nil,
         translationTimeout: Duration = .seconds(10),
         restartPolicy: CaptureRestartPolicy = .default,
-        silenceCheckInterval: Duration = .seconds(15),
         sleep: @escaping @Sendable (Duration) async throws -> Void = { _ in },
         silenceTimeout: Duration? = nil
     ) async -> SUT {
         let sut = makeSUT(
             kinds: kinds, now: now, translationTimeout: translationTimeout,
-            restartPolicy: restartPolicy, silenceCheckInterval: silenceCheckInterval, sleep: sleep
+            restartPolicy: restartPolicy, sleep: sleep
         )
         // 翻訳器はロケールごとに引かれる。テストではどのロケールでも同じものを返す
         var factory: (@Sendable (String) -> (any Translator)?)?

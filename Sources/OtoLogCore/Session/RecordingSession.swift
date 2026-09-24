@@ -38,7 +38,6 @@ public actor RecordingSession {
         store: any TranscriptStore,
         translationTimeout: Duration = .seconds(10),
         restartPolicy: CaptureRestartPolicy = .default,
-        silenceCheckInterval: Duration = .seconds(15),
         now: @escaping @Sendable () -> Date = { Date() },
         makeSessionID: @escaping @Sendable () -> UUID = { UUID() },
         sleep: @escaping @Sendable (Duration) async throws -> Void = { try await Task.sleep(for: $0) }
@@ -46,7 +45,6 @@ public actor RecordingSession {
         self.store = store
         self.translationTimeout = translationTimeout
         self.restartPolicy = restartPolicy
-        self.silenceCheckInterval = silenceCheckInterval
         self.now = now
         self.makeSessionID = makeSessionID
         self.sleep = sleep
@@ -184,12 +182,13 @@ public actor RecordingSession {
         var isStartingCapture = true
     }
 
+    /// 無音が続いたかを確かめる間隔。止まるのは無音が silenceTimeout に達してから最大でこの長さだけ遅れる。
+    /// 分単位の silenceTimeout に対して十分短く、確かめるのは経過時間の比較だけなので負荷も無い
+    private static let silenceCheckInterval: Duration = .seconds(15)
+
     private let store: any TranscriptStore
     private let translationTimeout: Duration
     private let restartPolicy: CaptureRestartPolicy
-    /// 無音が続いたかを確かめる間隔。止まるのは無音が silenceTimeout に達してから最大でこの長さだけ遅れる。
-    /// 分単位の silenceTimeout に対して十分短く、確かめるのは経過時間の比較だけなので負荷も無い
-    private let silenceCheckInterval: Duration
     private let now: @Sendable () -> Date
     private let makeSessionID: @Sendable () -> UUID
     private let sleep: @Sendable (Duration) async throws -> Void
@@ -497,7 +496,7 @@ public actor RecordingSession {
     /// timeout がそれより短ければ timeout ごとに確かめる（間隔ごとでは timeout の何倍も遅れて止まる）
     private func watchSilence(timeout: Duration, run: UUID) {
         silenceMonitor = SilenceMonitor(timeout: timeout, startedAt: now())
-        let interval = min(silenceCheckInterval, timeout)
+        let interval = min(Self.silenceCheckInterval, timeout)
         silenceWatchdog = Task { [weak self, sleep] in
             repeat {
                 // 取り消されたら抜ける（停止と失敗で閉じたとき）
