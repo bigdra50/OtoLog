@@ -147,7 +147,11 @@ import OtoLogCore
         }
     }
 
+    /// 記録が開いている間は変えない。開いている記録は元の保存先に書き続けるが、
+    /// 閉じた記録を扱う処理（recording.log の行、タイトル生成、パイプライン）は設定の保存先で記録を探す。
+    /// 設定のボタンも無効にしているが、フォルダを選ぶパネルを開いている間に ctl start で記録が始まることがある
     func updateSaveDirectory(_ url: URL) {
+        guard !state.isSessionOpen else { return }
         settings.saveDirectoryPath = url.path
         Task { [store] in
             await store.updateDirectory(url)

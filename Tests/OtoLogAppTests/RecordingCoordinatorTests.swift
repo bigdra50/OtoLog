@@ -101,4 +101,30 @@ import Testing
         #expect(fixture.sleeps.requestedDurations.isEmpty)
         await fixture.tearDown()
     }
+
+    // MARK: 保存先の変更
+
+    /// 開いている記録は元の保存先に書き続ける。閉じた記録を扱う処理は設定の保存先で記録を探すため、
+    /// 開いている間に変えると、タイトル生成やパイプラインが閉じた記録を見つけられない
+    @Test(arguments: [SessionState.preparing, .recording, .stopping]) func 記録が開いている間は保存先を変えない(sessionState: SessionState) async {
+        let fixture = RecordingCoordinatorFixture()
+        let before = fixture.settings.saveDirectoryPath
+        fixture.coordinator.apply(.stateChanged(sessionState))
+
+        fixture.coordinator.updateSaveDirectory(URL(fileURLWithPath: "/tmp/otolog-elsewhere", isDirectory: true))
+
+        #expect(fixture.settings.saveDirectoryPath == before)
+        await fixture.tearDown()
+    }
+
+    @Test(arguments: [SessionState.idle, .failed("システム音声: 認識が止まった")]) func 記録が閉じていれば保存先を変える(sessionState: SessionState) async {
+        let fixture = RecordingCoordinatorFixture()
+        fixture.coordinator.apply(.stateChanged(sessionState))
+        let elsewhere = URL(fileURLWithPath: "/tmp/otolog-elsewhere", isDirectory: true)
+
+        fixture.coordinator.updateSaveDirectory(elsewhere)
+
+        #expect(fixture.settings.saveDirectoryPath == elsewhere.path)
+        await fixture.tearDown()
+    }
 }

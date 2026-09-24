@@ -199,7 +199,7 @@ struct PopoverView: View {
                 generationSection
             }
             if showsSettings {
-                SettingsView(settings: settings, coordinator: coordinator)
+                SettingsView(settings: settings, state: state, coordinator: coordinator)
             }
         }
     }

@@ -59,12 +59,17 @@ import OtoLogCore
     }
 
     /// セッションのタイトルを生成して付与する（meta 更新 + ディレクトリリネーム）。
-    /// 軽量タスクなので haiku を指定する。成功時はリネーム後の参照で completion を呼ぶ
-    func assignTitle(session: SessionRef, onSuccess: (@MainActor (SessionRef) -> Void)? = nil) {
+    /// 軽量タスクなので haiku を指定する。成功時はリネーム後の参照で completion を呼ぶ。
+    /// saveDirectory は session がある保存先。省略すると今の設定の保存先を使う
+    func assignTitle(
+        session: SessionRef,
+        in saveDirectory: URL? = nil,
+        onSuccess: (@MainActor (SessionRef) -> Void)? = nil
+    ) {
         if case .running = state.generationState { return }
         state.generationState = .running(templateName: "タイトル")
         let assigner = TitleAssigner(
-            saveDirectory: settings.saveDirectory,
+            saveDirectory: saveDirectory ?? settings.saveDirectory,
             timeZone: .current,
             generator: ClaudeCLIGenerator(
                 executableURL: settings.claudeExecutableURL,
@@ -85,32 +90,35 @@ import OtoLogCore
         }
     }
 
-    /// 記録停止時のフック。一覧を更新し、設定に応じて自動処理を連鎖する
+    /// 記録停止時のフック。一覧を更新し、設定に応じて自動処理を連鎖する。
+    /// 閉じた記録は、ここで読む設定の保存先にある。記録が開いている間は保存先を変えられず、ここはまだ閉じる処理の途中にあたる。
+    /// 自動処理は claude を待つ間に保存先を変えられても、この保存先で最後まで進める
     func handleSessionFinished(_ ref: SessionRef) {
+        let saveDirectory = settings.saveDirectory
         Task { [weak self] in
             await self?.refresh()
         }
         Task { [weak self] in
-            await self?.runPostStopAction(for: ref)
+            await self?.runPostStopAction(for: ref, in: saveDirectory)
         }
     }
 
     /// 停止時の自動処理。タイトル生成が失敗した場合はパイプラインへ連鎖しない（手動で対処する）。
     /// 発話の無い記録には走らせない。タイトル生成が必ず失敗し、無音のまま自動停止した記録などでは、その失敗だけが表示に残るため。
     /// テストが停止イベントを経ずに呼んで確かめられるよう、private にしない
-    func runPostStopAction(for ref: SessionRef) async {
+    func runPostStopAction(for ref: SessionRef, in saveDirectory: URL) async {
         let action = settings.postStopAction
         guard action != .none else { return }
-        let reader = TranscriptReader(directory: settings.saveDirectory, timeZone: .current)
+        let reader = TranscriptReader(directory: saveDirectory, timeZone: .current)
         guard await OffMainIO.read({ reader.hasSpeech(in: ref) }) else { return }
         switch action {
         case .none:
             break
         case .title:
-            assignTitle(session: ref)
+            assignTitle(session: ref, in: saveDirectory)
         case .titleAndPipeline:
-            assignTitle(session: ref) { [weak self] renamed in
-                self?.runDefaultPlaybook(session: renamed)
+            assignTitle(session: ref, in: saveDirectory) { [weak self] renamed in
+                self?.runDefaultPlaybook(session: renamed, in: saveDirectory)
             }
         }
     }
@@ -125,15 +133,17 @@ import OtoLogCore
     /// 完了ごとに再検出するので、残りがあればもう一度押せばよい
     func processNextUnprocessed() {
         guard let finding = state.stewardFindings.first else { return }
+        // タイトル生成を待つ間に保存先を変えられても、判定とパイプラインは同じ保存先の記録を扱う
+        let saveDirectory = settings.saveDirectory
         if finding.needsTitle {
-            assignTitle(session: finding.session) { [weak self] renamed in
+            assignTitle(session: finding.session, in: saveDirectory) { [weak self] renamed in
                 if finding.needsPipeline {
-                    self?.runDefaultPlaybook(session: renamed)
+                    self?.runDefaultPlaybook(session: renamed, in: saveDirectory)
                 }
                 Task { await self?.refreshSteward() }
             }
         } else if finding.needsPipeline {
-            runDefaultPlaybook(session: finding.session)
+            runDefaultPlaybook(session: finding.session, in: saveDirectory)
             Task { [weak self] in
                 await self?.refreshSteward()
             }
@@ -179,22 +189,23 @@ import OtoLogCore
     private let settings: AppSettings
     private var generationTask: Task<Void, Never>?
 
-    private func runDefaultPlaybook(session: SessionRef) {
+    /// saveDirectory は session がある保存先。判定とパイプラインはこの保存先で記録を探す
+    private func runDefaultPlaybook(session: SessionRef, in saveDirectory: URL) {
         guard let pipeline else { return }
         pipeline.refresh()
         let playbooks = state.pipelinePlaybooks
         if settings.defaultPlaybookID == AppSettings.autoPlaybookID {
-            classifyThenRun(session: session, candidates: playbooks)
+            classifyThenRun(session: session, candidates: playbooks, in: saveDirectory)
         } else if let playbook = playbooks.first(where: { $0.id == settings.defaultPlaybookID }) ?? playbooks.first {
-            pipeline.run(playbook: playbook, session: session)
+            pipeline.run(playbook: playbook, session: session, in: saveDirectory)
         }
     }
 
     /// 内容ベースの自動判定（haiku）。判定不能なら実行せず、手動対処を促す表示を出す
-    private func classifyThenRun(session: SessionRef, candidates: [Playbook]) {
+    private func classifyThenRun(session: SessionRef, candidates: [Playbook], in saveDirectory: URL) {
         state.generationState = .running(templateName: "プレイブック判定")
         let classifier = SessionClassifier(
-            saveDirectory: settings.saveDirectory,
+            saveDirectory: saveDirectory,
             timeZone: .current,
             generator: ClaudeCLIGenerator(
                 executableURL: settings.claudeExecutableURL,
@@ -206,7 +217,7 @@ import OtoLogCore
                 let selected = try await classifier.classify(session: session, candidates: candidates)
                 state.generationState = .idle
                 if let selected {
-                    self?.pipeline?.run(playbook: selected, session: session)
+                    self?.pipeline?.run(playbook: selected, session: session, in: saveDirectory)
                 } else {
                     state.generationState = .failed("プレイブックを判定できませんでした。手動で実行してください")
                 }
