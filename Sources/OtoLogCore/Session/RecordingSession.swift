@@ -85,7 +85,7 @@ public actor RecordingSession {
                 })
                 formats.append(format)
             } catch {
-                setState(.failed(error.localizedDescription))
+                setState(.failed(Self.failureReason(error.localizedDescription, from: feed.kind)))
                 return
             }
         }
@@ -102,6 +102,7 @@ public actor RecordingSession {
         do {
             try await store.begin(context: baseContext)
         } catch {
+            // 保存先の確保はどの音源にも属さないため、音源名は付けない
             setState(.failed(error.localizedDescription))
             return
         }
@@ -113,7 +114,7 @@ public actor RecordingSession {
                 try await activate(feed: feed, index: index, format: formats[index], context: context)
             } catch {
                 await tearDownActiveFeeds()
-                setState(.failed(error.localizedDescription))
+                setState(.failed(Self.failureReason(error.localizedDescription, from: feed.kind)))
                 return
             }
         }
@@ -178,6 +179,12 @@ public actor RecordingSession {
         }
     }
 
+    /// 音源に由来する失敗の理由へ音源名を付ける（「マイク: …」）。
+    /// 複数音源の記録では、ポップオーバーとログでどちらが止まったかを見分けられないため
+    private static func failureReason(_ reason: String, from source: AudioSourceKind) -> String {
+        "\(source.displayName): \(reason)"
+    }
+
     private func cleanUpPreviousRun() {
         for slot in activeFeeds {
             slot.chunkContinuation?.finish()
@@ -200,7 +207,7 @@ public actor RecordingSession {
         let (chunkStream, chunkContinuation) = AsyncThrowingStream<AudioChunk, any Error>.makeStream()
         let engineEvents = try await feed.engine.start(chunks: chunkStream, context: context)
         var slot = FeedSlot(feed: feed, format: format, chunkContinuation: chunkContinuation)
-        slot.consumerTask = makeConsumerTask(engineEvents)
+        slot.consumerTask = makeConsumerTask(engineEvents, source: feed.kind)
         activeFeeds.append(slot)
         try await startCaptureAndForward(at: index)
     }
@@ -250,21 +257,34 @@ public actor RecordingSession {
         await attemptCaptureRestart(at: index, reason: error.localizedDescription)
     }
 
-    /// スリープ復帰などの一過性障害を想定して、そのフィードだけを1回再起動する。2回目は failed
+    /// スリープ復帰などの一過性障害を想定して、そのフィードだけを1回再起動する。2回目は failed。
+    /// 中断は再起動するかどうかにかかわらず毎回 captureInterrupted で流す
     private func attemptCaptureRestart(at index: Int, reason: String) async {
         // スロットが無いのは、外した後のキャプチャ（畳んでいる最中や前回の記録のもの）の終了が届いたとき。
         // 中断ではないので何もしない。ここで failed にすると、無関係な理由の failed が本来の理由より先に流れる
         guard index < activeFeeds.count else { return }
+        let source = activeFeeds[index].feed.kind
         guard activeFeeds[index].restartCount == 0 else {
-            await failSession(reason)
+            await giveUpCapture(source: source, reason: reason)
             return
         }
         activeFeeds[index].restartCount += 1
+        eventContinuation.yield(.captureInterrupted(CaptureInterruption(
+            source: source, reason: reason, restartAttempt: activeFeeds[index].restartCount
+        )))
         do {
             try await startCaptureAndForward(at: index)
         } catch {
-            await failSession(error.localizedDescription)
+            // 再起動できなかったことも中断として流す。同じ音源をもう一度再起動する規則は無いため諦める
+            await giveUpCapture(source: source, reason: error.localizedDescription)
         }
+    }
+
+    private func giveUpCapture(source: AudioSourceKind, reason: String) async {
+        eventContinuation.yield(.captureInterrupted(CaptureInterruption(
+            source: source, reason: reason, restartAttempt: nil
+        )))
+        await failSession(Self.failureReason(reason, from: source))
     }
 
     private func failSession(_ reason: String) async {
@@ -273,7 +293,8 @@ public actor RecordingSession {
     }
 
     private func makeConsumerTask(
-        _ engineEvents: AsyncThrowingStream<TranscriptEvent, any Error>
+        _ engineEvents: AsyncThrowingStream<TranscriptEvent, any Error>,
+        source: AudioSourceKind
     ) -> Task<Void, Never> {
         Task { [weak self] in
             do {
@@ -281,7 +302,7 @@ public actor RecordingSession {
                     await self?.handle(event)
                 }
             } catch {
-                await self?.engineFailed(error)
+                await self?.engineFailed(error, source: source)
             }
         }
     }
@@ -328,9 +349,9 @@ public actor RecordingSession {
         return created
     }
 
-    private func engineFailed(_ error: any Error) async {
+    private func engineFailed(_ error: any Error, source: AudioSourceKind) async {
         if state == .recording {
-            await failSession(error.localizedDescription)
+            await failSession(Self.failureReason(error.localizedDescription, from: source))
         }
     }
 }

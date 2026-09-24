@@ -20,6 +20,7 @@ actor SpyStore: TranscriptStore {
     var onFinalize: (@Sendable () -> Void)?
 
     func begin(context: TranscriptionContext) throws {
+        if let beginError { throw beginError }
         beganContexts.append(context)
     }
 
@@ -38,6 +39,10 @@ actor SpyStore: TranscriptStore {
         errorToThrow = error
     }
 
+    func setBeginError(_ error: (any Error)?) {
+        beginError = error
+    }
+
     func setOnFinalize(_ hook: (@Sendable () -> Void)?) {
         onFinalize = hook
     }
@@ -49,4 +54,5 @@ actor SpyStore: TranscriptStore {
     // MARK: Private
 
     private var errorToThrow: (any Error)?
+    private var beginError: (any Error)?
 }

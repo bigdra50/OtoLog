@@ -249,6 +249,10 @@ import OtoLogCore
             state.storeErrorMessage = message
         case let .translationError(message):
             state.translationErrorMessage = message
+        case .captureInterrupted:
+            // ポップオーバーには出さない。再起動で続くなら記録に支障はなく、
+            // 諦めたときは続く failed の状態遷移が音源名つきの理由を表示する
+            break
         case let .sessionFinished(ref):
             onSessionFinished?(ref)
         }
