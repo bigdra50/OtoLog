@@ -143,6 +143,7 @@ public actor RecordingSession {
             guard isPreparing(run) else { return }
         }
         setState(.recording)
+        restartCapturesInterruptedWhilePreparing()
     }
 
     public func stop() async {
@@ -165,6 +166,8 @@ public actor RecordingSession {
         /// 連続して再起動した回数と、最後に再起動した時刻。数え直すかどうかは restartPolicy が決める
         var consecutiveRestarts = 0
         var lastRestartAt: Date?
+        /// 起動の途中（.preparing）に中断して、.recording に入るのを待っている再起動が連続何回目か
+        var deferredRestartAttempt: Int?
         /// キャプチャの起動か再起動がそのキャプチャを受け持っている間 true。起動は start がスロットを作ってから、
         /// 再起動はキャプチャを止めるところから、どちらも中継を始めるか起動に失敗するまで続く。
         /// この間キャプチャを止めるのも起動するのも受け持った側だけで、閉じる側（stop() と失敗の片付け）は触れない。
@@ -358,7 +361,7 @@ public actor RecordingSession {
     private func attemptCaptureRestart(slotID: FeedSlot.ID, reason: String) async {
         // 閉じている途中（.stopping）や閉じた後に届く終了は、閉じる側が止めたキャプチャのもので中断ではない。
         // スロットが無いのは、前回の記録のキャプチャの終了が届いたとき。どちらも何もしない
-        guard state == .recording, let index = activeIndex(of: slotID) else { return }
+        guard isRunning, let index = activeIndex(of: slotID) else { return }
         let slot = activeFeeds[index]
         let decision = restartPolicy.decision(
             consecutiveRestarts: slot.consecutiveRestarts, lastRestartAt: slot.lastRestartAt, now: now()
@@ -370,11 +373,24 @@ public actor RecordingSession {
         eventContinuation.yield(.captureInterrupted(CaptureInterruption(
             source: slot.feed.kind, reason: reason, restartAttempt: attempt
         )))
+        guard state == .recording else {
+            // 起動の途中（.preparing）の中断は、.recording に入ってから再起動する。start が他のキャプチャを
+            // 起動している間に止めたり起動したりすると、その起動を乱しかねない。起動の失敗は再起動されず、記録全体の失敗になる
+            activeFeeds[index].deferredRestartAttempt = attempt
+            return
+        }
+        await restartCapture(slotID: slotID, attempt: attempt)
+    }
+
+    /// 中断したキャプチャを止め、落ち着くのを待ってから起動し直す。attempt は連続何回目の再起動か
+    private func restartCapture(slotID: FeedSlot.ID, attempt: Int) async {
+        guard state == .recording, let index = activeIndex(of: slotID) else { return }
+        let capture = activeFeeds[index].feed.capture
         // ここから中継を再開するまで、このキャプチャへの呼び出しは再起動だけが行う。
         // 止まったキャプチャが掴んでいるものを、待つ間も持ち続けないよう先に止める。
         // 1回の構成変更で中断の通知は続けて届くため、落ち着くのを待ってから再起動する
         activeFeeds[index].isStartingCapture = true
-        await slot.feed.capture.stop()
+        await capture.stop()
         // 待ちが投げても（中継タスクのキャンセル）、続く確認で記録がまだ続いているかを見て決める
         try? await sleep(restartPolicy.settleDelay)
         // actor は再入するため、待つ間に stop や失敗の片付けが走り、次の記録が始まっていることもある
@@ -391,6 +407,19 @@ public actor RecordingSession {
                 activeFeeds[index].lastRestartAt = now()
             }
             await attemptCaptureRestart(slotID: slotID, reason: error.localizedDescription)
+        }
+    }
+
+    /// 起動の途中に中断したキャプチャを、.recording に入ったところで再起動する。
+    /// そのフィードの中継は中断で終わっているため、再起動をそのスロットの中継タスクとして走らせ、stop() が完走を待てるようにする
+    private func restartCapturesInterruptedWhilePreparing() {
+        for index in activeFeeds.indices {
+            guard let attempt = activeFeeds[index].deferredRestartAttempt else { continue }
+            activeFeeds[index].deferredRestartAttempt = nil
+            let slotID = activeFeeds[index].id
+            activeFeeds[index].forwardingTask = Task { [weak self] in
+                await self?.restartCapture(slotID: slotID, attempt: attempt)
+            }
         }
     }
 
@@ -461,9 +490,11 @@ public actor RecordingSession {
         return created
     }
 
-    /// 失敗したエンジンの結果を受けるタスクの上で走る。閉じるときにそのタスクの完走は待たない
+    /// 失敗したエンジンの結果を受けるタスクの上で走る。閉じるときにそのタスクの完走は待たない。
+    /// 起動の途中の失敗も、起動に失敗したのと同じく記録全体を閉じる。エンジンの失敗は再起動では直らない
     private func engineFailed(_ error: any Error, slotID: FeedSlot.ID, source: AudioSourceKind) async {
-        guard state == .recording else { return }
+        // スロットが無いのは、閉じる側が外した後のエンジンの終了。失敗ではない
+        guard isRunning, activeIndex(of: slotID) != nil else { return }
         await close(
             .failed(Self.failureReason(error.localizedDescription, from: source)),
             waitingForForwarding: false,

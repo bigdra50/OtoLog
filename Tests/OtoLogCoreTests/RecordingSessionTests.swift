@@ -946,6 +946,79 @@ struct RecordingSessionTests {
         #expect(next.capture.startCallCount == 1)
     }
 
+    // MARK: 開始の途中の中断と失敗
+
+    /// 起動の途中（.preparing）に届いた中断も落とさない。中断はすぐ知らせるが、他のキャプチャを起動している間は
+    /// 中断したキャプチャに触れず、.recording に入ってから再起動の方針どおりに再起動する
+    @Test func interruptionWhilePreparingRestartsTheFeedOnceRecording() async {
+        let gate = ManualSleep(holding: true)
+        let sut = makeSUT(kinds: [.system, .microphone])
+        let system = sut.feedDoubles[0].capture
+        sut.feedDoubles[1].capture.onStart = { await gate.sleep(for: .zero) }
+        let starting = Task { await sut.session.start(feeds: sut.feeds, locales: [ja]) }
+        #expect(await eventually { gate.waitingCount == 1 })
+
+        system.fail(Described(message: "構成が変わった"))
+
+        #expect(await eventually {
+            interruptions(in: sut.collector.events) == [
+                CaptureInterruption(source: .system, reason: "構成が変わった", restartAttempt: 1),
+            ]
+        })
+        #expect(system.stopCallCount == 0)
+        #expect(system.startCallCount == 1)
+        gate.release()
+        await starting.value
+        #expect(await eventually { system.startCallCount == 2 })
+        #expect(await sut.session.state == .recording)
+        #expect(system.maxConcurrentCalls == 1)
+        system.emit(AudioChunk(buffer: TestSignal.sine(format: sut.feedDoubles[0].engine.prepareFormat, seconds: 0.1)))
+        #expect(await eventually { sut.feedDoubles[0].engine.consumedChunkCount == 1 })
+    }
+
+    /// 起動の途中に中断したまま止められたら、再起動せずに閉じる。中断したキャプチャは停止が1回だけ止める
+    @Test func stopAfterAnInterruptionWhilePreparingClosesWithoutRestarting() async {
+        let gate = ManualSleep(holding: true)
+        let sut = makeSUT(kinds: [.system, .microphone])
+        let system = sut.feedDoubles[0].capture
+        sut.feedDoubles[1].capture.onStart = { await gate.sleep(for: .zero) }
+        let starting = Task { await sut.session.start(feeds: sut.feeds, locales: [ja]) }
+        #expect(await eventually { gate.waitingCount == 1 })
+        system.fail(Described(message: "構成が変わった"))
+        #expect(await eventually { !interruptions(in: sut.collector.events).isEmpty })
+
+        await sut.session.stop()
+        gate.release()
+        await starting.value
+
+        #expect(await sut.session.state == .idle)
+        #expect(system.startCallCount == 1)
+        #expect(system.stopCallCount == 1)
+        #expect(await sut.store.finalizedReasons == [.stopped])
+    }
+
+    /// 起動の途中にエンジンが失敗したら、起動に失敗したのと同じく記録全体を失敗として閉じる。
+    /// エンジンの失敗は再起動では直らないため待たない。起動の途中のキャプチャは起動し終えたところで1回だけ止まる
+    @Test func engineFailureWhilePreparingFailsTheStart() async {
+        let gate = ManualSleep(holding: true)
+        let sut = makeSUT(kinds: [.system, .microphone])
+        let microphone = sut.feedDoubles[1].capture
+        microphone.onStart = { await gate.sleep(for: .zero) }
+        let starting = Task { await sut.session.start(feeds: sut.feeds, locales: [ja]) }
+        #expect(await eventually { gate.waitingCount == 1 })
+
+        sut.feedDoubles[0].engine.failEvents(Described(message: "認識が止まった"))
+
+        #expect(await eventually { await sut.session.state == .failed("システム音声: 認識が止まった") })
+        gate.release()
+        await starting.value
+        #expect(await sut.session.state == .failed("システム音声: 認識が止まった"))
+        #expect(await sut.store.finalizedReasons == [.failed("システム音声: 認識が止まった")])
+        #expect(microphone.stopCallCount == 1)
+        #expect(microphone.maxConcurrentCalls == 1)
+        #expect(!sut.collector.events.contains(.stateChanged(.recording)))
+    }
+
     // MARK: 翻訳
 
     /// 訳はセグメントへ載せてから保存する。ストアには訳つきの1件だけが渡る
