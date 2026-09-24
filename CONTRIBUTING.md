@@ -68,8 +68,8 @@ swift run otolog-devtool ctl <status|start|stop>      # 起動中アプリの制
 
 ## プロジェクト構成
 
-- `OtoLogCore` — コントラクト + 実装。全ロジックのテストはここ
-- `OtoLogApp` — 薄い UI 層（テストなし）
+- `OtoLogCore`: コントラクトと実装。記録・保存・生成のロジックとそのテストを置く
+- `OtoLogApp`: 薄い UI 層。設定の保存、イベントの画面への反映、ポップオーバーと字幕の寸法、ログの書式などをテストしている
 - コントラクト（`Contracts/`）を境界に、キャプチャ源・エンジン・ストア・翻訳器は差し替え可能
 
 ## 設計上の要点（SpeechAnalyzer の落とし穴）
