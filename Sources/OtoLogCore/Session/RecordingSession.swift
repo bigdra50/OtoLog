@@ -5,6 +5,7 @@ import Foundation
 
 /// 1音源ぶんの録音構成。キャプチャとエンジンは1:1で対にする。
 /// エンジンの start は1セッション1回の規約があり、複数音源で共有できない。
+/// キャプチャも記録ごとに作り直す。失敗で畳んだ直後は、前の記録の再起動がまだそのキャプチャを止めている途中のことがある。
 /// kind はセグメントの source（話者区別の根拠）としてそのまま保存される
 public struct RecordingFeed: Sendable {
     // MARK: Lifecycle
@@ -128,7 +129,9 @@ public actor RecordingSession {
     public func stop() async {
         guard state == .recording || state == .preparing else { return }
         setState(.stopping)
-        for slot in activeFeeds {
+        // 再起動の途中のキャプチャは、.stopping を見た再起動が止める。ここからも止めると同じキャプチャへの呼び出しが重なる。
+        // 再起動は forwarding の上で走るため、止め終えるのは下の完走待ちで一緒に待つ
+        for slot in activeFeeds where !slot.isRestarting {
             await slot.feed.capture.stop()
         }
         // キャプチャストリームの正常終了（forwarding の完走）を待ってから閉じる
@@ -167,6 +170,10 @@ public actor RecordingSession {
         /// 連続して再起動した回数と、最後に再起動した時刻。数え直すかどうかは restartPolicy が決める
         var consecutiveRestarts = 0
         var lastRestartAt: Date?
+        /// 再起動がキャプチャを止めてから、中継を再開するか起動に失敗するまでの間 true。
+        /// この間キャプチャを止めるのも起動するのも再起動だけで、stop() と失敗の片付けは触れない。
+        /// 実キャプチャは掴んでいるものを確かめてから解放するため、同じキャプチャへの呼び出しが重なると同じものを二重に解放する
+        var isRestarting = false
     }
 
     private let store: any TranscriptStore
@@ -225,12 +232,17 @@ public actor RecordingSession {
     /// 片方の音源だけで録り続けると「揃った記録」に見えてしまうため、部分継続はしない。
     ///
     /// スロットはキャプチャを止める前に外す。畳んでいる間はまだ recording のままなので、
-    /// 止めたキャプチャのストリーム終了がスロットに届くと、中断として再起動されてしまう
+    /// 止めたキャプチャのストリーム終了がスロットに届くと、中断として再起動されてしまう。
+    ///
+    /// 再起動の途中のキャプチャは、スロットが外れたのを見た再起動が止める。
+    /// 再起動の stop や start が終わるのは待たずに畳み、失敗をすぐ知らせる
     private func tearDownActiveFeeds() async {
         let slots = activeFeeds
         activeFeeds.removeAll()
         for slot in slots {
-            await slot.feed.capture.stop()
+            if !slot.isRestarting {
+                await slot.feed.capture.stop()
+            }
             slot.chunkContinuation?.finish()
             slot.forwardingTask?.cancel()
             slot.consumerTask?.cancel()
@@ -255,6 +267,9 @@ public actor RecordingSession {
             await slot.feed.capture.stop()
             return
         }
+        // 中継を始めたキャプチャは、再起動したものも stop() と失敗の片付けが止める。
+        // 中継の開始と同じ区切りで受け持ちを戻し、止める側がいないキャプチャを作らない
+        activeFeeds[index].isRestarting = false
         activeFeeds[index].forwardingTask = Task { [weak self] in
             do {
                 for try await chunk in stream {
@@ -286,8 +301,10 @@ public actor RecordingSession {
         eventContinuation.yield(.captureInterrupted(CaptureInterruption(
             source: slot.feed.kind, reason: reason, restartAttempt: attempt
         )))
+        // ここから中継を再開するまで、このキャプチャへの呼び出しは再起動だけが行う。
         // 止まったキャプチャが掴んでいるものを、待つ間も持ち続けないよう先に止める。
         // 1回の構成変更で中断の通知は続けて届くため、落ち着くのを待ってから再起動する
+        activeFeeds[index].isRestarting = true
         await slot.feed.capture.stop()
         do {
             try await sleep(restartPolicy.settleDelay)
@@ -303,7 +320,11 @@ public actor RecordingSession {
         do {
             try await startCaptureAndForward(slotID: slotID)
         } catch {
-            // 起動できなかったのも連続した中断の1回として数え、同じ手順でやり直すか諦める
+            // 起動できなかったのも連続した中断の1回として数え、同じ手順でやり直すか諦める。
+            // 動いていないキャプチャの受け持ちは戻し、諦めて畳むときは他のフィードと同じく止めさせる
+            if let index = activeIndex(of: slotID) {
+                activeFeeds[index].isRestarting = false
+            }
             await attemptCaptureRestart(slotID: slotID, reason: error.localizedDescription)
         }
     }

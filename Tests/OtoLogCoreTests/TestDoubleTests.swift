@@ -59,6 +59,26 @@ struct TestDoubleTests {
         #expect(source.startErrors.isEmpty)
     }
 
+    /// 順に呼んだ start と stop は重なりに数えず、stop の途中で呼ばれた stop は重なりに数える
+    @Test func fakeCaptureSourceRecordsOverlappingCalls() async throws {
+        let source = FakeCaptureSource()
+        _ = try await source.start(targetFormat: format)
+        await source.stop()
+        #expect(source.maxConcurrentCalls == 1)
+
+        let gate = ManualSleep(holding: true)
+        source.onStop = { await gate.sleep(for: .zero) }
+        let first = Task { await source.stop() }
+        #expect(await eventually { gate.waitingCount == 1 })
+        let second = Task { await source.stop() }
+        #expect(await eventually { gate.waitingCount == 2 })
+        gate.release()
+        await first.value
+        await second.value
+
+        #expect(source.maxConcurrentCalls == 2)
+    }
+
     /// hold 中は release まで戻らない。release 後の呼び出しは待たずに戻る
     @Test func manualSleepHoldsCallersUntilReleased() async {
         let sleep = ManualSleep(holding: true)

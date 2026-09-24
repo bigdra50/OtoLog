@@ -485,7 +485,8 @@ struct RecordingSessionTests {
     }
 
     /// 再起動の start を待つ間に停止されたら、起動し終えたキャプチャを止めてから抜ける。
-    /// 中継しないキャプチャが動き続けると、記録を止めた後もデバイスを掴んだまま残る
+    /// 中継しないキャプチャが動き続けると、記録を止めた後もデバイスを掴んだまま残る。
+    /// 停止の側からは、起動の途中のキャプチャに stop を重ねない
     @Test func stopWhileRestartedCaptureIsStartingLeavesNoCaptureRunning() async {
         let gate = ManualSleep(holding: true)
         let sut = await makeStartedSUT()
@@ -500,6 +501,77 @@ struct RecordingSessionTests {
 
         #expect(await sut.session.state == .idle)
         #expect(sut.capture.startCallCount == 2)
+        #expect(!sut.capture.isCapturing)
+        // stop は再起動の2回だけ（待つ前と、起動し終えた後）
+        #expect(sut.capture.stopCallCount == 2)
+        #expect(sut.capture.maxConcurrentCalls == 1)
+    }
+
+    /// 再起動がキャプチャを止めている最中に停止されたら、そのキャプチャを止めるのは再起動に任せる。
+    /// 同じキャプチャの stop を重ねると、実キャプチャは掴んでいるものを確かめてから解放するため、同じものを二重に解放する
+    @Test func stopWhileRestartIsStoppingTheCaptureDoesNotStopItAgain() async {
+        let gate = ManualSleep(holding: true)
+        let sut = await makeStartedSUT()
+        sut.capture.onStop = { await gate.sleep(for: .zero) }
+        sut.capture.fail(Boom())
+        #expect(await eventually { gate.waitingCount == 1 })
+
+        let stopping = Task { await sut.session.stop() }
+        #expect(await eventually { await sut.session.state == .stopping })
+        gate.release()
+        await stopping.value
+
+        #expect(await sut.session.state == .idle)
+        #expect(sut.capture.stopCallCount == 1)
+        #expect(sut.capture.maxConcurrentCalls == 1)
+        #expect(sut.capture.startCallCount == 1)
+    }
+
+    /// 再起動がキャプチャを止めている最中に他の音源の失敗で畳まれても、そのキャプチャに stop を重ねない。
+    /// 畳む側は再起動の stop を待たずに failed にし、止め終えるのは再起動に任せる
+    @Test func failureWhileRestartIsStoppingTheCaptureDoesNotStopItAgain() async {
+        let gate = ManualSleep(holding: true)
+        let sut = await makeStartedSUT(kinds: [.system, .microphone])
+        let microphone = sut.feedDoubles[1].capture
+        microphone.onStop = { await gate.sleep(for: .zero) }
+        microphone.fail(Boom())
+        #expect(await eventually { gate.waitingCount == 1 })
+
+        sut.feedDoubles[0].engine.failEvents(Described(message: "認識が止まった"))
+
+        #expect(await eventually { await sut.session.state == .failed("システム音声: 認識が止まった") })
+        gate.release()
+        #expect(await eventually { gate.returnedCount == 1 })
+        #expect(microphone.stopCallCount == 1)
+        #expect(microphone.maxConcurrentCalls == 1)
+        #expect(sut.feedDoubles[0].capture.stopCallCount == 1)
+    }
+
+    /// 中継を再開したキャプチャは、以降の停止で他と同じく止まる。
+    /// 再起動の受け持ちが残ると停止はそのキャプチャを止めず、終わらない中継を待ち続ける
+    @Test func stopAfterARestartStopsTheRestartedCapture() async {
+        let sut = await makeStartedSUT()
+        sut.capture.fail(Boom())
+        #expect(await eventually { sut.capture.startCallCount == 2 })
+        sut.capture.emit(AudioChunk(buffer: TestSignal.sine(format: sut.engine.prepareFormat, seconds: 0.1)))
+        #expect(await eventually { sut.engine.consumedChunkCount == 1 })
+
+        // 停止が戻らない場合もテストが終わるよう、別タスクで始めて状態を待つ
+        Task { await sut.session.stop() }
+
+        #expect(await eventually { await sut.session.state == .idle })
+        #expect(!sut.capture.isCapturing)
+    }
+
+    /// 中継を再開したキャプチャは、次の中断で諦めて畳むときにも止まる
+    @Test func givingUpAfterARestartStopsTheRestartedCapture() async {
+        let sut = await makeStartedSUT(restartPolicy: singleRestart)
+        sut.capture.fail(Described(message: "1回目"))
+        #expect(await eventually { sut.capture.startCallCount == 2 })
+
+        sut.capture.fail(Described(message: "2回目"))
+
+        #expect(await eventually { await sut.session.state == .failed("システム音声: 2回目") })
         #expect(!sut.capture.isCapturing)
     }
 
@@ -567,6 +639,8 @@ struct RecordingSessionTests {
             ]
         })
         #expect(sut.capture.startCallCount == 3)
+        // 再起動ごとに止める2回と、諦めて畳むときの1回。起動できなかったキャプチャも畳むときに止める
+        #expect(sut.capture.stopCallCount == 3)
     }
 
     // MARK: 翻訳
