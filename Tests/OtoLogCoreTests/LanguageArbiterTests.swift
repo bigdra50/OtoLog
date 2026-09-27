@@ -67,19 +67,45 @@ struct LanguageArbiterTests {
     @Test func decidesFromVolatileText() {
         var sut = LanguageArbiter(candidates: ["en-US", "ja-JP"])
 
-        _ = sut.acceptVolatile(text: japanese, locale: "ja-JP")
+        let outcome = sut.acceptVolatile(text: japanese, locale: "ja-JP")
 
         #expect(sut.decidedLocale == "ja-JP")
+        #expect(outcome.display == japanese)
+    }
+
+    /// 途中経過で決まったときも、それまで溜めた勝者の確定結果を出す。
+    /// 12 文字に満たない確定結果（「はい、始めます」）は判定の材料にならずに保留され、続く発話の途中経過で決まることがある
+    @Test func releasesHeldFinalsWhenAVolatileDecides() {
+        var sut = LanguageArbiter(candidates: ["en-US", "ja-JP"])
+        var emitted = sut.accept(segment(text: "はい、始めます", locale: "ja-JP"))
+        _ = sut.accept(segment(text: "Hai, hajimemasu", locale: "en-US"))
+
+        let outcome = sut.acceptVolatile(text: japanese, locale: "ja-JP")
+        emitted += outcome.released
+        emitted += sut.accept(segment(text: japanese, locale: "ja-JP"))
+        emitted += sut.flush()
+
+        #expect(sut.decidedLocale == "ja-JP")
+        #expect(outcome.released.map(\.text) == ["はい、始めます"])
+        #expect(emitted.map(\.text) == ["はい、始めます", japanese])
+    }
+
+    /// 決まった後の途中経過は何も出さない（保留分は決まった時点で出し終えている）
+    @Test func volatileAfterDecisionReleasesNothing() {
+        var sut = LanguageArbiter(candidates: ["en-US", "ja-JP"])
+        _ = sut.accept(segment(text: japanese, locale: "ja-JP"))
+
+        #expect(sut.acceptVolatile(text: "つづき", locale: "ja-JP").released.isEmpty)
     }
 
     /// 未決定のあいだのライブ表示は、最も長い結果を出している認識器のものを使う
     @Test func showsLongestVolatileWhileUndecided() {
         var sut = LanguageArbiter(candidates: ["en-US", "ja-JP"])
 
-        #expect(sut.acceptVolatile(text: "本日", locale: "ja-JP") == "本日")
-        #expect(sut.acceptVolatile(text: "Hong ji", locale: "en-US") == "Hong ji")
+        #expect(sut.acceptVolatile(text: "本日", locale: "ja-JP").display == "本日")
+        #expect(sut.acceptVolatile(text: "Hong ji", locale: "en-US").display == "Hong ji")
         // 短いほうが後から来ても、表示は長いほうを保つ
-        #expect(sut.acceptVolatile(text: "本日", locale: "ja-JP") == "Hong ji")
+        #expect(sut.acceptVolatile(text: "本日", locale: "ja-JP").display == "Hong ji")
     }
 
     /// 決定後の volatile は勝者のものだけを通す
@@ -87,8 +113,8 @@ struct LanguageArbiterTests {
         var sut = LanguageArbiter(candidates: ["en-US", "ja-JP"])
         _ = sut.accept(segment(text: japanese, locale: "ja-JP"))
 
-        #expect(sut.acceptVolatile(text: "つづき", locale: "ja-JP") == "つづき")
-        #expect(sut.acceptVolatile(text: "tsuzuki", locale: "en-US") == nil)
+        #expect(sut.acceptVolatile(text: "つづき", locale: "ja-JP").display == "つづき")
+        #expect(sut.acceptVolatile(text: "tsuzuki", locale: "en-US").display == nil)
     }
 
     /// 候補が1つなら並行認識をしないので、最初から決定済みとして素通しする
@@ -97,7 +123,7 @@ struct LanguageArbiterTests {
 
         #expect(sut.decidedLocale == "ja-JP")
         #expect(sut.accept(segment(text: "みじかい", locale: "ja-JP")).map(\.text) == ["みじかい"])
-        #expect(sut.acceptVolatile(text: "み", locale: "ja-JP") == "み")
+        #expect(sut.acceptVolatile(text: "み", locale: "ja-JP").display == "み")
     }
 
     // MARK: Private
