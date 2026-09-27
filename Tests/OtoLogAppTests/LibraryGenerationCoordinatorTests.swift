@@ -249,8 +249,12 @@ import Testing
             )
             let settings = SettingsStub(Self.environment(saveDirectory: oldDirectory))
             let recorded = OnlyRecorder()
+            let aloneRuns = Counter()
             let sut = LibraryGenerationCoordinator(
-                run: { _, _, _ in URL(fileURLWithPath: "/tmp/out.md") },
+                run: { _, _, _ in
+                    await aloneRuns.increment()
+                    return URL(fileURLWithPath: "/tmp/out.md")
+                },
                 runPipeline: { _, _, only, _ in await recorded.set(only) },
                 environment: { settings.value }
             )
@@ -259,6 +263,7 @@ import Testing
             await sut.generate(session: session, template: BuiltInTemplates.minutes)
 
             #expect(await recorded.value?.count == 1)
+            #expect(await aloneRuns.value == 0)
         }
     }
 
@@ -290,6 +295,39 @@ import Testing
             await sut.generate(session: session, template: BuiltInTemplates.minutes)
 
             #expect(await recorded.values == [Self.environment(saveDirectory: oldDirectory)])
+        }
+    }
+
+    /// アプリが使う init(settings:) も、作った後に変えた保存先と claude で走る。
+    /// 設定を読むのはこの初期化子が組み立てる実行なので、run を差し替えずに書き出しまで通す
+    @Test func 設定から作ると次の単発生成は新しい保存先とclaudeで書き出す() async throws {
+        try await SessionFixture.withTempDir { root in
+            let fixture = try Self.makeOldAndNewSettings(in: root)
+            let settings = SettingsStub(fixture.old)
+            let sut = LibraryGenerationCoordinator(settings: settings)
+
+            settings.value = fixture.new
+            await sut.generate(session: fixture.session, template: BuiltInTemplates.summary)
+
+            #expect(sut.error(for: fixture.session) == nil)
+            #expect(Self.document("summary", of: fixture.session, in: fixture.new)?.contains(Self.newClaudeAnswer) == true)
+        }
+    }
+
+    @Test func 設定から作ると次のプレイブック実行は新しい保存先とclaudeで書き出す() async throws {
+        try await SessionFixture.withTempDir { root in
+            let fixture = try Self.makeOldAndNewSettings(in: root)
+            let settings = SettingsStub(fixture.old)
+            let sut = LibraryGenerationCoordinator(settings: settings)
+            let playbook = Playbook(
+                id: "summary-only", displayName: "要約だけ",
+                tasks: [PlaybookTask(templateID: "summary", model: .haiku)]
+            )
+
+            settings.value = fixture.new
+            await sut.generate(session: fixture.session, playbook: playbook)
+
+            #expect(Self.document("summary", of: fixture.session, in: fixture.new)?.contains(Self.newClaudeAnswer) == true)
         }
     }
 
@@ -338,7 +376,7 @@ import Testing
     }
 
     /// 設定の代わり。AppSettings は UserDefaults のスイートを残すため、値を直接差し替える
-    @MainActor private final class SettingsStub {
+    @MainActor private final class SettingsStub: LibraryGenerationSettings {
         // MARK: Lifecycle
 
         init(_ value: LibraryGenerationCoordinator.Environment) {
@@ -348,6 +386,14 @@ import Testing
         // MARK: Internal
 
         var value: LibraryGenerationCoordinator.Environment
+
+        var saveDirectory: URL {
+            value.saveDirectory
+        }
+
+        var claudeExecutableURL: URL {
+            value.claudeExecutableURL
+        }
     }
 
     private actor EnvironmentRecorder {
@@ -357,6 +403,9 @@ import Testing
             values.append(environment)
         }
     }
+
+    /// 偽の claude が返す本文。書き出された生成物にこれがあれば、新しい claude で生成したと分かる
+    private static let newClaudeAnswer = "new-claude-answer"
 
     private var oldEnvironment: LibraryGenerationCoordinator.Environment {
         LibraryGenerationCoordinator.Environment(
@@ -386,6 +435,39 @@ import Testing
 
     private var minutes: GenerationTemplate {
         BuiltInTemplates.minutes
+    }
+
+    /// 古い保存先には記録が無く、古い claude のパスには実行ファイルが無い。
+    /// 記録と偽の claude は新しい側にだけ置くので、どちらかでも古い値のまま走ると書き出しまで届かない
+    private static func makeOldAndNewSettings(in root: URL) throws -> (
+        old: LibraryGenerationCoordinator.Environment,
+        new: LibraryGenerationCoordinator.Environment,
+        session: SessionRef
+    ) {
+        let newDirectory = root.appendingPathComponent("new", isDirectory: true)
+        let session = try SessionFixture.make(in: newDirectory, name: "2026-07-31/1300", texts: ["こんにちは"])
+        let bin = root.appendingPathComponent("new-bin", isDirectory: true)
+        try FileManager.default.createDirectory(at: bin, withIntermediateDirectories: true)
+        let claude = bin.appendingPathComponent("claude")
+        try "#!/bin/sh\nprintf \(newClaudeAnswer)\n".write(to: claude, atomically: true, encoding: .utf8)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: claude.path)
+        let old = LibraryGenerationCoordinator.Environment(
+            saveDirectory: root.appendingPathComponent("old", isDirectory: true),
+            claudeExecutableURL: root.appendingPathComponent("old-bin/claude")
+        )
+        let new = LibraryGenerationCoordinator.Environment(saveDirectory: newDirectory, claudeExecutableURL: claude)
+        return (old, new, session)
+    }
+
+    private static func document(
+        _ templateID: String,
+        of session: SessionRef,
+        in environment: LibraryGenerationCoordinator.Environment
+    ) -> String? {
+        let url = environment.saveDirectory
+            .appendingPathComponent(session.directoryName)
+            .appendingPathComponent("\(templateID).md")
+        return try? String(contentsOf: url, encoding: .utf8)
     }
 
     private static func environment(saveDirectory: URL) -> LibraryGenerationCoordinator.Environment {

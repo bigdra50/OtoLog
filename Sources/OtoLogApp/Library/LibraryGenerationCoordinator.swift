@@ -2,6 +2,21 @@ import Foundation
 import Observation
 import OtoLogCore
 
+// MARK: - LibraryGenerationSettings
+
+/// ライブラリからの実行が設定から読む値。アプリでは AppSettings が満たす。
+/// テストで AppSettings を作ると UserDefaults のスイートが残るため、テストは代わりの型を渡す
+@MainActor protocol LibraryGenerationSettings: AnyObject {
+    var saveDirectory: URL { get }
+    var claudeExecutableURL: URL { get }
+}
+
+// MARK: - AppSettings + LibraryGenerationSettings
+
+extension AppSettings: LibraryGenerationSettings {}
+
+// MARK: - LibraryGenerationCoordinator
+
 /// ライブラリからの生成の進行を持つ。
 ///
 /// 状態をビューに置くと、セッションを切り替えた時点で表示が失われる
@@ -11,12 +26,16 @@ import OtoLogCore
     // MARK: Lifecycle
 
     /// run は差し替え可能。既定は claude CLI 経由の実生成。
-    /// environment は実行を始めるたびに1度だけ呼ぶ
+    /// environment は generate を呼ぶたびに1度だけ呼ぶ。
+    /// 既定値は run を差し替えるテスト向けで、誤って実生成に渡っても起動に失敗するよう存在しないパスにしている
     init(
         run: @escaping Run,
         runPipeline: RunPipeline? = nil,
         environment: @escaping @MainActor () -> Environment = {
-            Environment(saveDirectory: URL(fileURLWithPath: "/"), claudeExecutableURL: URL(fileURLWithPath: "/"))
+            Environment(
+                saveDirectory: URL(fileURLWithPath: "/nonexistent", isDirectory: true),
+                claudeExecutableURL: URL(fileURLWithPath: "/nonexistent/claude")
+            )
         }
     ) {
         self.run = run
@@ -26,7 +45,7 @@ import OtoLogCore
 
     /// コーディネータはアプリの起動時に1度だけ作られる。
     /// 設定はここで写し取らず、実行を始めるたびに読む（ライブラリの一覧も表示のたびに今の保存先を読む）
-    convenience init(settings: AppSettings) {
+    convenience init(settings: some LibraryGenerationSettings) {
         self.init(run: { session, template, environment in
             let runner = PostProcessRunner(
                 directory: environment.saveDirectory,
@@ -68,7 +87,7 @@ import OtoLogCore
 
     // MARK: Internal
 
-    /// run・runPipeline は MainActor の外で走るため設定を読めない。実行の始めに読んだ値を引数で受け取る
+    /// 実行の途中で設定が変わっても値がぶれないよう、run・runPipeline は始めに読んだ値を引数で受け取る
     typealias Run = @Sendable (SessionRef, GenerationTemplate, Environment) async throws -> URL
     typealias RunPipeline = @Sendable (SessionRef, Playbook, [String]?, Environment) async -> Void
 
