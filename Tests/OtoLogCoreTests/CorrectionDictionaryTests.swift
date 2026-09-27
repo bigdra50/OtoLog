@@ -21,6 +21,23 @@ struct CorrectionDictionaryTests {
         }
     }
 
+    /// 別々のストアが同時に学習しても、観測の回数を後勝ちで消さない。
+    /// ストアは値型で呼び出しごとに作られ、ポップオーバーとライブラリのパイプラインが別々に correct を終えることがある
+    @Test func concurrentRecordsKeepEveryObservation() throws {
+        try withTempDir { dir in
+            let url = dir.appendingPathComponent("corrections.json")
+            let now = Date(timeIntervalSince1970: 1_785_297_600)
+
+            DispatchQueue.concurrentPerform(iterations: 40) { _ in
+                _ = try? CorrectionDictionaryStore(fileURL: url).record(
+                    [CorrectionPair(wrong: "家紋", right: "山")], now: now
+                )
+            }
+
+            #expect(CorrectionDictionaryStore(fileURL: url).load().entries.first?.count == 40)
+        }
+    }
+
     /// 逆向きのペアが観測されたら両方無効化する（誤学習の混入監査）
     @Test func recordRemovesContradictoryPairs() throws {
         try withTempDir { dir in

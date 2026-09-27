@@ -196,6 +196,39 @@ public struct CorrectionDictionaryStore: Sendable {
     /// 観測ペアを取り込み、監査を適用して保存する。
     /// 監査: 逆向きペアが現れたら両方向を無効化（誤学習の混入防止）、上限超過は古い順に削除
     @discardableResult public func record(_ pairs: [CorrectionPair], now: Date) throws -> CorrectionDictionary {
+        try Self.updateLock.withLock { try recordLocked(pairs, now: now) }
+    }
+
+    /// 人によるチェック結果を書き戻す。該当が無ければ何もしない
+    @discardableResult public func review(
+        wrong: String,
+        right: String,
+        as review: CorrectionReview,
+        now: Date
+    ) throws -> CorrectionDictionary {
+        try Self.updateLock.withLock {
+            var dictionary = load()
+            guard let index = dictionary.entries.firstIndex(where: {
+                $0.wrong == wrong && $0.right == right
+            }) else { return dictionary }
+            dictionary.entries[index].review = review
+            dictionary.entries[index].reviewedAt = review == .unreviewed ? nil : now
+            try save(dictionary)
+            return dictionary
+        }
+    }
+
+    // MARK: Private
+
+    /// 読み込みから保存までを直列にする。ストアは値型で呼び出しごとに作られるため、インスタンスではなく型で持つ。
+    /// 重ねると、後から保存した側が先の観測を消す（ポップオーバーとライブラリのパイプラインが別々に correct を終えるとき）。
+    /// 別のプロセス（otolog-devtool）とは直列にならないが、学習するのはアプリの生成とパイプラインだけ
+    private static let updateLock = NSLock()
+
+    private let fileURL: URL
+    private let maxEntries: Int
+
+    private func recordLocked(_ pairs: [CorrectionPair], now: Date) throws -> CorrectionDictionary {
         var dictionary = load()
 
         for pair in pairs {
@@ -232,28 +265,6 @@ public struct CorrectionDictionaryStore: Sendable {
         try save(dictionary)
         return dictionary
     }
-
-    /// 人によるチェック結果を書き戻す。該当が無ければ何もしない
-    @discardableResult public func review(
-        wrong: String,
-        right: String,
-        as review: CorrectionReview,
-        now: Date
-    ) throws -> CorrectionDictionary {
-        var dictionary = load()
-        guard let index = dictionary.entries.firstIndex(where: {
-            $0.wrong == wrong && $0.right == right
-        }) else { return dictionary }
-        dictionary.entries[index].review = review
-        dictionary.entries[index].reviewedAt = review == .unreviewed ? nil : now
-        try save(dictionary)
-        return dictionary
-    }
-
-    // MARK: Private
-
-    private let fileURL: URL
-    private let maxEntries: Int
 
     private func decoder() -> JSONDecoder {
         let decoder = JSONDecoder()
