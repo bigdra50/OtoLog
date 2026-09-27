@@ -2,6 +2,21 @@ import Foundation
 import Observation
 import OtoLogCore
 
+// MARK: - LibraryGenerationSettings
+
+/// ライブラリからの実行が設定から読む値。アプリでは AppSettings が満たす。
+/// テストで AppSettings を作ると UserDefaults のスイートが残るため、テストは代わりの型を渡す
+@MainActor protocol LibraryGenerationSettings: AnyObject {
+    var saveDirectory: URL { get }
+    var claudeExecutableURL: URL { get }
+}
+
+// MARK: - AppSettings + LibraryGenerationSettings
+
+extension AppSettings: LibraryGenerationSettings {}
+
+// MARK: - LibraryGenerationCoordinator
+
 /// ライブラリからの生成の進行を持つ。
 ///
 /// 状態をビューに置くと、セッションを切り替えた時点で表示が失われる
@@ -10,24 +25,33 @@ import OtoLogCore
 @MainActor @Observable final class LibraryGenerationCoordinator {
     // MARK: Lifecycle
 
-    /// run は差し替え可能。既定は claude CLI 経由の実生成
-    init(run: @escaping Run, runPipeline: RunPipeline? = nil, saveDirectory: URL = URL(fileURLWithPath: "/")) {
+    /// run は差し替え可能。既定は claude CLI 経由の実生成。
+    /// environment は generate を呼ぶたびに1度だけ呼ぶ。
+    /// 既定値は run を差し替えるテスト向けで、誤って実生成に渡っても起動に失敗するよう存在しないパスにしている
+    init(
+        run: @escaping Run,
+        runPipeline: RunPipeline? = nil,
+        environment: @escaping @MainActor () -> Environment = {
+            Environment(
+                saveDirectory: URL(fileURLWithPath: "/nonexistent", isDirectory: true),
+                claudeExecutableURL: URL(fileURLWithPath: "/nonexistent/claude")
+            )
+        }
+    ) {
         self.run = run
         self.runPipeline = runPipeline
-        self.saveDirectory = saveDirectory
+        currentEnvironment = environment
     }
 
-    convenience init(settings: AppSettings) {
-        // クロージャは MainActor の外で走るので、設定値はここで写し取る
-        let directory = settings.saveDirectory
-        let executableURL = settings.claudeExecutableURL
-        let saveDirectory = settings.saveDirectory
-        self.init(run: { session, template in
+    /// コーディネータはアプリの起動時に1度だけ作られる。
+    /// 設定はここで写し取らず、実行を始めるたびに読む（ライブラリの一覧も表示のたびに今の保存先を読む）
+    convenience init(settings: some LibraryGenerationSettings) {
+        self.init(run: { session, template, environment in
             let runner = PostProcessRunner(
-                directory: directory,
+                directory: environment.saveDirectory,
                 timeZone: .current,
                 generator: ClaudeCLIGenerator(
-                    executableURL: executableURL,
+                    executableURL: environment.claudeExecutableURL,
                     arguments: ClaudeCLIGenerator.arguments(
                         model: nil,
                         allowWebResearch: template.allowsWebResearch,
@@ -36,9 +60,9 @@ import OtoLogCore
                 )
             )
             return try await runner.run(session: session, template: template)
-        }, runPipeline: { session, playbook, only in
+        }, runPipeline: { session, playbook, only, environment in
             let runner = PipelineRunner(
-                saveDirectory: saveDirectory,
+                saveDirectory: environment.saveDirectory,
                 timeZone: .current,
                 generatorFactory: { task in
                     let schemas = Dictionary(
@@ -46,7 +70,7 @@ import OtoLogCore
                         uniquingKeysWith: { first, _ in first }
                     )
                     return ClaudeCLIGenerator(
-                        executableURL: executableURL,
+                        executableURL: environment.claudeExecutableURL,
                         arguments: ClaudeCLIGenerator.arguments(
                             model: task.model,
                             allowWebResearch: task.allowsWebResearch,
@@ -56,13 +80,23 @@ import OtoLogCore
                 }
             )
             for await _ in await runner.run(playbook: playbook, session: session, only: only) {}
-        }, saveDirectory: saveDirectory)
+        }, environment: {
+            Environment(saveDirectory: settings.saveDirectory, claudeExecutableURL: settings.claudeExecutableURL)
+        })
     }
 
     // MARK: Internal
 
-    typealias Run = @Sendable (SessionRef, GenerationTemplate) async throws -> URL
-    typealias RunPipeline = @Sendable (SessionRef, Playbook, [String]?) async -> Void
+    /// 実行の途中で設定が変わっても値がぶれないよう、run・runPipeline は始めに読んだ値を引数で受け取る
+    typealias Run = @Sendable (SessionRef, GenerationTemplate, Environment) async throws -> URL
+    typealias RunPipeline = @Sendable (SessionRef, Playbook, [String]?, Environment) async -> Void
+
+    /// 1回の実行が設定から使う値。実行の始めに1度だけ読み、途中で設定が変わってもその実行はこの値のまま進める。
+    /// 途中で保存先が変わると、同じ実行の読み書きが2つの保存先にまたがる
+    struct Environment: Equatable {
+        let saveDirectory: URL
+        let claudeExecutableURL: URL
+    }
 
     /// 実行中の1件（アクティビティ表示用）。label はテンプレート id か "playbook:<id>"
     struct RunningGeneration: Identifiable, Equatable {
@@ -108,29 +142,19 @@ import OtoLogCore
     /// 補正済みのプレイブックに属するタスクなら、単発ではなく `only` 指定で走らせる。
     /// 単発生成は transcript.jsonl（原文）を読むため、そのままだと補正の結果が捨てられる
     func generate(session: SessionRef, template: GenerationTemplate) async {
-        if let resolved = pipelineTask(for: template, in: session) {
-            await generate(session: session, playbook: resolved.playbook, only: [resolved.taskID])
+        // 振り分けに読む meta.json と実行先は同じ保存先でなければならないので、1度だけ読んで両方に使う
+        let environment = currentEnvironment()
+        if let resolved = pipelineTask(for: template, in: session, under: environment.saveDirectory) {
+            await runPlaybook(session: session, playbook: resolved.playbook, only: [resolved.taskID], with: environment)
             return
         }
-        await generateAlone(session: session, template: template)
+        await generateAlone(session: session, template: template, with: environment)
     }
 
     /// プレイブックを走らせる。only を渡すとそのタスクだけを再実行し、
     /// 依存の充足は前回 done の出力を再利用する（補正をやり直さずに下流だけ作り直せる）
     func generate(session: SessionRef, playbook: Playbook, only: [String]? = nil) async {
-        guard let runPipeline else { return }
-        let label = only?.first ?? "playbook:\(playbook.id)"
-        let key = Key(sessionID: session.id, templateID: label)
-        guard !running.contains(key) else { return }
-        running.insert(key)
-        errors[session.id] = nil
-        defer { running.remove(key) }
-
-        await runPipeline(session, playbook, only)
-        finished = (
-            session: session.id,
-            templateID: only?.first ?? playbook.tasks.first?.templateID ?? ""
-        )
+        await runPlaybook(session: session, playbook: playbook, only: only, with: currentEnvironment())
     }
 
     // MARK: Private
@@ -142,11 +166,36 @@ import OtoLogCore
 
     private let run: Run
     private let runPipeline: RunPipeline?
-    private let saveDirectory: URL
+    private let currentEnvironment: @MainActor () -> Environment
     private var running: Set<Key> = []
     private var errors: [String: String] = [:]
 
-    private func generateAlone(session: SessionRef, template: GenerationTemplate) async {
+    private func runPlaybook(
+        session: SessionRef,
+        playbook: Playbook,
+        only: [String]?,
+        with environment: Environment
+    ) async {
+        guard let runPipeline else { return }
+        let label = only?.first ?? "playbook:\(playbook.id)"
+        let key = Key(sessionID: session.id, templateID: label)
+        guard !running.contains(key) else { return }
+        running.insert(key)
+        errors[session.id] = nil
+        defer { running.remove(key) }
+
+        await runPipeline(session, playbook, only, environment)
+        finished = (
+            session: session.id,
+            templateID: only?.first ?? playbook.tasks.first?.templateID ?? ""
+        )
+    }
+
+    private func generateAlone(
+        session: SessionRef,
+        template: GenerationTemplate,
+        with environment: Environment
+    ) async {
         let key = Key(sessionID: session.id, templateID: template.id)
         guard !running.contains(key) else { return }
         running.insert(key)
@@ -154,7 +203,7 @@ import OtoLogCore
         defer { running.remove(key) }
 
         do {
-            _ = try await run(session, template)
+            _ = try await run(session, template, environment)
             finished = (session: session.id, templateID: template.id)
         } catch {
             errors[session.id] = error.localizedDescription
@@ -162,19 +211,17 @@ import OtoLogCore
     }
 
     /// このセッションで実行済みのプレイブックに、そのテンプレートのタスクが含まれるか。
-    /// 含まれていれば補正の結果を引き継いで再実行できる
+    /// 含まれていれば補正の結果を引き継いで再実行できる。saveDirectory は session がある保存先
     private func pipelineTask(
         for template: GenerationTemplate,
-        in session: SessionRef
+        in session: SessionRef,
+        under saveDirectory: URL
     ) -> (playbook: Playbook, taskID: String)? {
-        guard let playbookID = meta(for: session)?.playbookID,
-              let playbook = PlaybookStore().loadPlaybooks().first(where: { $0.id == playbookID }),
-              let task = playbook.tasks.first(where: { $0.templateID == template.id })
+        guard let playbookID = TranscriptReader(directory: saveDirectory, timeZone: .current)
+            .meta(in: session)?.playbookID,
+            let playbook = PlaybookStore().loadPlaybooks().first(where: { $0.id == playbookID }),
+            let task = playbook.tasks.first(where: { $0.templateID == template.id })
         else { return nil }
         return (playbook, task.id)
-    }
-
-    private func meta(for session: SessionRef) -> SessionMeta? {
-        TranscriptReader(directory: saveDirectory, timeZone: .current).meta(in: session)
     }
 }
