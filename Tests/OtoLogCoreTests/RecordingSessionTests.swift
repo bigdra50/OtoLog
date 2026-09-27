@@ -814,6 +814,50 @@ struct RecordingSessionTests {
         #expect(!sut.collector.events.contains { if case .stateChanged(.failed) = $0 { true } else { false } })
     }
 
+    // MARK: 閉じ終えるまで待つ停止（アプリの終了）
+
+    /// 記録中なら止めて、閉じ終えてから戻る
+    @Test func stopAndWaitUntilClosedStopsARecording() async {
+        let sut = await makeStartedSUT()
+
+        await sut.session.stopAndWaitUntilClosed()
+
+        #expect(await sut.session.state == .idle)
+        #expect(await sut.store.finalizedReasons == [.stopped])
+    }
+
+    /// ほかの閉じ方（失敗の片付け）が閉じている途中なら、その終わりを待ってから戻る。
+    /// stop() はすぐ戻るが、アプリを終えるときに戻ってしまうと、閉じ終える前にプロセスが終わる
+    @Test func stopAndWaitUntilClosedWaitsForAClosingInProgress() async {
+        let gate = ManualSleep(holding: true)
+        let sut = await makeStartedSUT()
+        sut.capture.onStop = { await gate.sleep(for: .zero) }
+        sut.engine.failEvents(Described(message: "認識が止まった"))
+        #expect(await eventually { gate.waitingCount == 1 })
+        let returns = OrderLog()
+
+        let waiting = Task {
+            await sut.session.stopAndWaitUntilClosed()
+            returns.append("returned")
+        }
+        try? await Task.sleep(for: .milliseconds(100))
+        #expect(returns.entries.isEmpty)
+        gate.release()
+        await waiting.value
+
+        #expect(await sut.session.state == .failed("システム音声: 認識が止まった"))
+        #expect(await sut.store.finalizedReasons == [.failed("システム音声: 認識が止まった")])
+    }
+
+    @Test func stopAndWaitUntilClosedReturnsAtOnceWhenIdle() async {
+        let sut = makeSUT()
+
+        await sut.session.stopAndWaitUntilClosed()
+
+        #expect(await sut.session.state == .idle)
+        #expect(await sut.store.finalizedReasons.isEmpty)
+    }
+
     // MARK: 閉じられなかったとき（meta.json を書けない）
 
     /// 閉じられなかったことを保存エラーとして知らせる。黙っていると終わりの無い記録が残り、タイトル生成も走らない。

@@ -13,7 +13,10 @@ import OtoLogCore
         let pipeline = PipelineCoordinator(state: state, settings: settings)
         let library = LibraryWindowController(settings: settings)
         generation.pipeline = pipeline
-        coordinator.onSessionFinished = { [weak generation] ref in
+        coordinator.onSessionFinished = { [weak self, weak generation] ref in
+            // 終了の途中で閉じた記録には走らせない。claude の応答より先にアプリが終わる。
+            // タイトルもプレイブックも無い記録として残り、次に起動したときに「未処理の記録」から処理できる
+            guard self?.isTerminating != true else { return }
             generation?.handleSessionFinished(ref)
         }
         statusItemController = StatusItemController(
@@ -47,11 +50,32 @@ import OtoLogCore
         }
     }
 
+    /// 記録を閉じてから終える。閉じずに終えると、meta.json に終わりが残らず、確定前の末尾の発話と停止後の処理も失われる。
+    /// ログアウトやシャットダウン、osascript の quit もここを通る
+    func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+        guard let coordinator else { return .terminateNow }
+        isTerminating = true
+        // 閉じている間に ctl start で次の記録を始めさせない
+        controlServer?.stop()
+        controlServer = nil
+        Task {
+            await coordinator.closeForTermination(timeout: Self.closeTimeout)
+            sender.reply(toApplicationShouldTerminate: true)
+        }
+        return .terminateLater
+    }
+
     func applicationWillTerminate(_: Notification) {
         controlServer?.stop()
     }
 
     // MARK: Private
+
+    /// 閉じる処理は、最後の確定セグメントの翻訳（上限 10 秒）と結果の列の終わり（上限 2 秒）を待つことがある。
+    /// それを待てる長さにし、それでも閉じ終わらなければ、ログアウトやシャットダウンを止め続けないよう諦めて終える
+    private static let closeTimeout: Duration = .seconds(15)
+
+    private var isTerminating = false
 
     private var statusItemController: StatusItemController?
     private var coordinator: RecordingCoordinator?

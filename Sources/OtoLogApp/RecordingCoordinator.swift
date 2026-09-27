@@ -117,9 +117,12 @@ import OtoLogCore
         }
     }
 
-    func stopIfRecording() {
-        Task { [session] in
-            await session.stop()
+    /// アプリの終了で記録を閉じる。閉じ終えるか timeout が過ぎるまで待つ。
+    /// timeout で戻っても閉じる処理は止めない（続きはプロセスの終わりで途切れる）
+    func closeForTermination(timeout: Duration) async {
+        let session = session
+        _ = await awaitAtMost(timeout) {
+            await session.stopAndWaitUntilClosed()
         }
     }
 
