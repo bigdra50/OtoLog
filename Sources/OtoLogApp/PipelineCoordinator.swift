@@ -6,9 +6,10 @@ import OtoLogCore
 @MainActor final class PipelineCoordinator {
     // MARK: Lifecycle
 
-    init(state: AppState, settings: AppSettings) {
+    init(state: AppState, settings: AppSettings, workLock: SessionWorkLock = .shared) {
         self.state = state
         self.settings = settings
+        self.workLock = workLock
     }
 
     // MARK: Internal
@@ -84,7 +85,8 @@ import OtoLogCore
                         jsonSchema: schemas[task.templateID] ?? nil
                     )
                 )
-            }
+            },
+            workLock: workLock
         )
         self.runner = runner
 
@@ -133,6 +135,7 @@ import OtoLogCore
 
     private let state: AppState
     private let settings: AppSettings
+    private let workLock: SessionWorkLock
     private var runner: PipelineRunner?
     private var pipelineTask: Task<Void, Never>?
 }

@@ -75,6 +75,37 @@ import Testing
         }
     }
 
+    /// 記録中の記録は未処理に出さない。24時間を超えて続く記録を、クラッシュの残骸として処理させない
+    @Test func 記録中の記録は未処理に出さない() async throws {
+        try await SessionFixture.withTempDir { root in
+            let ref = try SessionFixture.make(in: root, name: "2026-07-29/1300", texts: ["本文"])
+            let lock = SessionWorkLock()
+            _ = await lock.open(ref, in: root)
+            let (state, settings) = makeStateAndSettings(saveDirectory: root)
+            let coordinator = GenerationCoordinator(state: state, settings: settings, workLock: lock)
+
+            await coordinator.refreshSteward()
+
+            #expect(state.stewardFindings.isEmpty)
+        }
+    }
+
+    /// 一覧を読み直すと、どれが記録中かも分かる。ポップオーバーは記録中の記録にタイトル生成のボタンを出さない
+    @Test func 一覧を読み直すと記録中の記録が分かる() async throws {
+        try await SessionFixture.withTempDir { root in
+            let ref = try SessionFixture.make(in: root, name: "2026-07-29/1300", texts: ["本文"])
+            try SessionFixture.make(in: root, name: "2026-07-29/1200", texts: ["前の記録"])
+            let lock = SessionWorkLock()
+            _ = await lock.open(ref, in: root)
+            let (state, settings) = makeStateAndSettings(saveDirectory: root)
+            let coordinator = GenerationCoordinator(state: state, settings: settings, workLock: lock)
+
+            await coordinator.refresh()
+
+            #expect(state.openSessionNames == ["2026-07-29/1300"])
+        }
+    }
+
     @Test func refreshStewardは完了時点で未処理セッションを反映している() async throws {
         try await SessionFixture.withTempDir { root in
             // title 未付与 + playbook 未実行 = 未処理として検出される

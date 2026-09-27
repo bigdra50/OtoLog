@@ -203,6 +203,65 @@ struct SessionFileStoreTests {
         }
     }
 
+    // MARK: 記録中の meta.json と、開いていることの知らせ
+
+    /// 閉じるときは meta.json を読み直し、終わりだけを足す。記録中にほかの書き手が足した項目を、開いた時点の中身で消さない
+    @Test func finalizeKeepsFieldsOthersWroteWhileRecording() async throws {
+        try await withTempDir { dir in
+            let store = SessionFileStore(directory: dir, timeZone: jst, workLock: SessionWorkLock())
+            try await store.begin(context: context)
+            let metaURL = dir.appendingPathComponent("2026-07-29/1300/meta.json")
+            var written = try SessionMetaCoder.decode(Data(contentsOf: metaURL))
+            written.playbookID = "lecture"
+            written.pipeline = ["summary": PipelineTaskState(status: .done, outputFile: "summary.md")]
+            try SessionMetaCoder.encode(written).write(to: metaURL)
+
+            _ = try await store.finalize(endedAt: Date(timeIntervalSince1970: 1_785_301_200), reason: .stopped)
+
+            let meta = try SessionMetaCoder.decode(Data(contentsOf: metaURL))
+            #expect(meta.playbookID == "lecture")
+            #expect(meta.pipeline?["summary"]?.status == .done)
+            #expect(meta.endedAt == Date(timeIntervalSince1970: 1_785_301_200))
+            #expect(meta.endReason == "stopped")
+        }
+    }
+
+    /// 開いている間は、タイトル付与とパイプラインがこの記録を対象にしないよう、開いていることを知らせる
+    @Test func marksTheSessionOpenFromBeginUntilFinalize() async throws {
+        try await withTempDir { dir in
+            let lock = SessionWorkLock()
+            let store = SessionFileStore(directory: dir, timeZone: jst, workLock: lock)
+            let live = SessionRef(directoryName: "2026-07-29/1300", title: nil, startedAt: context.sessionStartedAt)
+            try await store.begin(context: context)
+            #expect(await lock.isOpen(live, in: dir))
+
+            _ = try await store.finalize(endedAt: Date(timeIntervalSince1970: 1_785_301_200), reason: .stopped)
+
+            #expect(await !lock.isOpen(live, in: dir))
+        }
+    }
+
+    /// meta.json を書けずに閉じられなかった記録も、開いたままにはしない。
+    /// 残すと、その記録へのタイトル付与とパイプラインを、アプリを再起動するまで断り続ける
+    @Test func failedFinalizeStillClosesTheSession() async throws {
+        try await withTempDir { dir in
+            let lock = SessionWorkLock()
+            let store = SessionFileStore(directory: dir, timeZone: jst, workLock: lock)
+            let live = SessionRef(directoryName: "2026-07-29/1300", title: nil, startedAt: context.sessionStartedAt)
+            try await store.begin(context: context)
+            // ディレクトリをファイルに置き換え、meta.json を書けなくする
+            let sessionDir = dir.appendingPathComponent("2026-07-29/1300")
+            try FileManager.default.removeItem(at: sessionDir)
+            try Data().write(to: sessionDir)
+
+            await #expect(throws: (any Error).self) {
+                _ = try await store.finalize(endedAt: Date(timeIntervalSince1970: 1_785_301_200), reason: .stopped)
+            }
+
+            #expect(await !lock.isOpen(live, in: dir))
+        }
+    }
+
     // MARK: Private
 
     private func withTempDir(_ body: (URL) async throws -> Void) async throws {

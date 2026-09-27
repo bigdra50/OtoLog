@@ -212,6 +212,11 @@ struct LibraryView: View {
 
     private func trash(_ row: LibrarySessionRow) async {
         let directory = settings.saveDirectory
+        // 記録中のセッションは消さない。消しても保存が次の追記でディレクトリを作り直し、途中からの記録として残る
+        guard await !SessionWorkLock.shared.isOpen(row.session, in: directory) else {
+            trashErrorMessage = "記録中のセッションは削除できません。記録を止めてから削除してください。"
+            return
+        }
         let relativePath = row.session.directoryName
         let result = await OffMainIO.read {
             Result { try SessionTrash.moveToTrash(root: directory, relativePath: relativePath) }

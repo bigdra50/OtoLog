@@ -427,6 +427,111 @@ struct PipelineRunnerTests {
         }
     }
 
+    // MARK: 記録中と、同じ記録のほかの作業
+
+    /// 記録中の記録には走らせない。対象のタスクは理由つきの失敗として知らせ、meta.json には触れない。
+    /// 書くと、閉じるときの meta.json の書き直しとぶつかる
+    @Test(.timeLimit(.minutes(1))) func refusesAnOpenSessionWithoutTouchingMeta() async throws {
+        try await withSessionDir { root, sessionDir in
+            let lock = SessionWorkLock()
+            _ = await lock.open(session, in: root)
+            let playbook = Playbook(id: "p", displayName: "p", tasks: [
+                PlaybookTask(templateID: "correct", model: .sonnet),
+                PlaybookTask(templateID: "summary", model: .sonnet, dependsOn: ["correct"]),
+            ])
+            let generator = FakeTextGenerator(result: "使われない")
+            let runner = makeRunner(
+                root: root, generators: ["correct": generator, "summary": generator], workLock: lock
+            )
+
+            var errors: [String: String] = [:]
+            var finished: (done: Int, failed: Int, skipped: Int)?
+            for await event in await runner.run(playbook: playbook, session: session) {
+                switch event {
+                case let .taskStateChanged(taskID, state):
+                    if state.status == .failed {
+                        errors[taskID] = state.error
+                    }
+                case let .finished(done, failed, skipped):
+                    finished = (done, failed, skipped)
+                case .taskProgress:
+                    break
+                }
+            }
+
+            #expect(finished! == (done: 0, failed: 2, skipped: 0))
+            #expect(errors["correct"] == SessionWorkLockError.sessionIsOpen.errorDescription)
+            #expect(generator.receivedPrompts.isEmpty)
+            let meta = try SessionMetaCoder.decode(Data(contentsOf: sessionDir.appendingPathComponent("meta.json")))
+            #expect(meta.playbookID == nil)
+            #expect(meta.pipeline == nil)
+        }
+    }
+
+    /// 同じ記録のパイプラインが走っている間は待ち、終わってから走る。
+    /// どちらも meta.json を読み直して自分の状態を書くため、重ねると後から書いた側が先の状態を消す
+    @Test(.timeLimit(.minutes(1))) func waitsForAnotherPipelineOnTheSameSession() async throws {
+        try await withSessionDir { root, _ in
+            let lock = SessionWorkLock()
+            let other = try await lock.acquire(.pipeline, for: session, in: root)
+            let playbook = Playbook(id: "p", displayName: "p", tasks: [
+                PlaybookTask(templateID: "summary", model: .sonnet),
+            ])
+            let generator = FakeTextGenerator(result: "要約")
+            let runner = makeRunner(root: root, generators: ["summary": generator], workLock: lock)
+
+            let stream = await runner.run(playbook: playbook, session: session)
+            let running = Task {
+                var done = 0
+                for await event in stream {
+                    if case let .finished(finishedDone, _, _) = event {
+                        done = finishedDone
+                    }
+                }
+                return done
+            }
+            #expect(await eventually { await lock.waitingCount(for: session, in: root) == 1 })
+            #expect(generator.receivedPrompts.isEmpty)
+            await lock.release(other)
+
+            #expect(await running.value == 1)
+        }
+    }
+
+    /// タイトル付与で移った記録は、移った先で走り、移った先の meta.json に状態を書く
+    @Test(.timeLimit(.minutes(1))) func runsInTheNewPlaceAfterARetitle() async throws {
+        try await withSessionDir { root, _ in
+            let lock = SessionWorkLock()
+            let retitle = try await lock.acquire(.retitle, for: session, in: root)
+            let playbook = Playbook(id: "p", displayName: "p", tasks: [
+                PlaybookTask(templateID: "summary", model: .sonnet),
+            ])
+            let runner = makeRunner(root: root, generators: ["summary": FakeTextGenerator(result: "要約")], workLock: lock)
+            let stream = await runner.run(playbook: playbook, session: session)
+            let running = Task {
+                for await _ in stream {}
+            }
+            #expect(await eventually { await lock.waitingCount(for: session, in: root) == 1 })
+
+            let moved = SessionRef(directoryName: "2026-07-29/定例会議", title: "定例会議", startedAt: session.startedAt)
+            try FileManager.default.createDirectory(
+                at: root.appendingPathComponent("2026-07-29"), withIntermediateDirectories: true
+            )
+            try FileManager.default.moveItem(
+                at: root.appendingPathComponent(session.directoryName),
+                to: root.appendingPathComponent(moved.directoryName)
+            )
+            await lock.release(retitle, movedTo: moved)
+            await running.value
+
+            let movedDir = root.appendingPathComponent(moved.directoryName)
+            let meta = try SessionMetaCoder.decode(Data(contentsOf: movedDir.appendingPathComponent("meta.json")))
+            #expect(meta.pipeline?["summary"]?.status == .done)
+            #expect(FileManager.default.fileExists(atPath: movedDir.appendingPathComponent("summary.md").path))
+            #expect(!FileManager.default.fileExists(atPath: root.appendingPathComponent(session.directoryName).path))
+        }
+    }
+
     // MARK: Private
 
     private func makeRunner(
@@ -435,7 +540,8 @@ struct PipelineRunnerTests {
         maxConcurrent: Int = 2,
         correctionStore: CorrectionDictionaryStore? = nil, // テストから実 config を汚さない
         knowledgeStore: KnowledgeStore? = nil, // 同上。既定のままだと実 config の knowledge.md を読む
-        correctionChunkCharacters: Int = 12_000
+        correctionChunkCharacters: Int = 12_000,
+        workLock: SessionWorkLock = SessionWorkLock()
     ) -> PipelineRunner {
         PipelineRunner(
             saveDirectory: root,
@@ -445,6 +551,7 @@ struct PipelineRunnerTests {
             knowledgeStore: knowledgeStore,
             maxConcurrent: maxConcurrent,
             correctionChunkCharacters: correctionChunkCharacters,
+            workLock: workLock,
             now: { Date(timeIntervalSince1970: 1_785_297_600) }
         )
     }

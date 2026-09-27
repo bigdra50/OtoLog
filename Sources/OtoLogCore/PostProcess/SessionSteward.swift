@@ -35,10 +35,13 @@ public struct SessionSteward: Sendable {
 
     // MARK: Public
 
-    public func findings(now: Date = Date()) -> [StewardFinding] {
+    /// openSessions は保存中の記録の相対パス（SessionWorkLock.openSessionNames）。
+    /// 開いている記録は、どれだけ長く続いていても対象にしない。タイトル付与とパイプラインは開いている記録を断る
+    public func findings(now: Date = Date(), excluding openSessions: Set<String> = []) -> [StewardFinding] {
         let reader = TranscriptReader(directory: saveDirectory, timeZone: timeZone)
         return reader.availableSessions().compactMap { session in
-            guard let meta = reader.meta(in: session) else { return nil }
+            guard !openSessions.contains(session.directoryName),
+                  let meta = reader.meta(in: session) else { return nil }
             // endedAt が無い = 記録中の可能性。開始から十分古いものだけクラッシュ残骸として扱う
             let isSettled = meta.endedAt != nil
                 || now.timeIntervalSince(meta.startedAt) >= staleThreshold

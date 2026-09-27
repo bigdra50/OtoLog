@@ -119,6 +119,27 @@ import Testing
         #expect(!sut.isRunning(session: sessionA))
     }
 
+    /// 記録中のセッションにはプレイブックを走らせず、理由を出す。
+    /// 走らせると、記録を閉じるときの meta.json の書き直しでプレイブックの状態が消える
+    @Test func 記録中のセッションにはプレイブックを走らせない() async {
+        let lock = SessionWorkLock()
+        let root = URL(fileURLWithPath: "/tmp/otolog-library-open", isDirectory: true)
+        _ = await lock.open(sessionA, in: root)
+        let calls = Counter()
+        let sut = LibraryGenerationCoordinator(
+            run: { _, _, _ in URL(fileURLWithPath: "/tmp/out.md") },
+            runPipeline: { _, _, _, _ in await calls.increment() },
+            environment: { Self.environment(saveDirectory: root) },
+            workLock: lock
+        )
+
+        await sut.generate(session: sessionA, playbook: BuiltInPlaybooks.meeting)
+
+        #expect(await calls.value == 0)
+        #expect(sut.error(for: sessionA) == SessionWorkLockError.sessionIsOpen.errorDescription)
+        #expect(!sut.isRunning(session: sessionA))
+    }
+
     /// パイプラインを渡していなければ何もしない（既定の初期化子は渡す）
     @Test func パイプライン未設定なら実行しない() async {
         let sut = LibraryGenerationCoordinator { _, _, _ in URL(fileURLWithPath: "/tmp/out.md") }

@@ -8,16 +8,18 @@ import Foundation
 public actor SessionFileStore: TranscriptStore {
     // MARK: Lifecycle
 
-    public init(directory: URL, timeZone: TimeZone) {
+    public init(directory: URL, timeZone: TimeZone, workLock: SessionWorkLock = .shared) {
         self.directory = directory
         self.timeZone = timeZone
+        self.workLock = workLock
         namer = SessionDirectoryNamer(timeZone: timeZone)
         formatter = MarkdownFormatter(timeZone: timeZone)
     }
 
     // MARK: Public
 
-    public func begin(context: TranscriptionContext) throws {
+    /// 開いた記録は、閉じるまでタイトル付与とパイプラインの対象にしない（SessionWorkLock に開いたことを知らせる）
+    public func begin(context: TranscriptionContext) async throws {
         // 日付フォルダ階層: <ルート>/<yyyy-MM-dd>/<HHmm>/（同分の連番は -2, -3, …）
         let date = namer.dateComponent(for: context.sessionStartedAt)
         let time = namer.timeComponent(for: context.sessionStartedAt)
@@ -40,7 +42,11 @@ public actor SessionFileStore: TranscriptStore {
         try SessionMetaCoder.encode(meta).write(
             to: sessionDirectory.appendingPathComponent("meta.json"), options: .atomic
         )
-        active = ActiveSession(directory: sessionDirectory, relativePath: "\(date)/\(name)", meta: meta)
+        let relativePath = "\(date)/\(name)"
+        let lease = await workLock.open(
+            SessionRef(directoryName: relativePath, title: nil, startedAt: context.sessionStartedAt), in: directory
+        )
+        active = ActiveSession(directory: sessionDirectory, relativePath: relativePath, meta: meta, lease: lease)
     }
 
     public func append(_ segment: TranscriptSegment) throws {
@@ -57,14 +63,23 @@ public actor SessionFileStore: TranscriptStore {
         }
     }
 
-    public func finalize(endedAt: Date, reason: SessionEndReason) throws -> SessionRef? {
+    /// meta.json を読み直して、終わりだけを足す。記録中にほかの書き手が足した項目を、開いた時点の中身で消さない。
+    /// 書けなかったときも記録は閉じる。この記録へ追記することはもう無く、開いたままにするとタイトル付与とパイプラインを断り続ける
+    public func finalize(endedAt: Date, reason: SessionEndReason) async throws -> SessionRef? {
         guard let active else { return nil }
-        var meta = active.meta
-        meta.markEnded(at: endedAt, reason: reason)
-        try SessionMetaCoder.encode(meta).write(
-            to: active.directory.appendingPathComponent("meta.json"), options: .atomic
-        )
         self.active = nil
+        let metaURL = active.directory.appendingPathComponent("meta.json")
+        // 読めない・別の記録のもの（外から置き換えられた）なら、開いた時点の中身に戻す
+        let onDisk = (try? Data(contentsOf: metaURL)).flatMap { try? SessionMetaCoder.decode($0) }
+        var meta = if let onDisk, onDisk.sessionID == active.meta.sessionID { onDisk } else { active.meta }
+        meta.markEnded(at: endedAt, reason: reason)
+        do {
+            try SessionMetaCoder.encode(meta).write(to: metaURL, options: .atomic)
+        } catch {
+            await workLock.release(active.lease)
+            throw error
+        }
+        await workLock.release(active.lease)
         return SessionRef(
             directoryName: active.relativePath,
             title: meta.title,
@@ -89,12 +104,15 @@ public actor SessionFileStore: TranscriptStore {
         /// 保存ルートからの相対パス（SessionRef.directoryName になる）
         let relativePath: String
         let meta: SessionMeta
+        /// 開いている間の受け持ち。閉じるときに返す
+        let lease: SessionWorkLock.Lease
     }
 
     private var directory: URL
     private var active: ActiveSession?
 
     private let timeZone: TimeZone
+    private let workLock: SessionWorkLock
     private let namer: SessionDirectoryNamer
     private let formatter: MarkdownFormatter
 

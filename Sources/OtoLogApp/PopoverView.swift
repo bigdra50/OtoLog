@@ -294,7 +294,7 @@ struct PopoverView: View {
             }
         }
         HStack(spacing: 2) {
-            if state.isRecording, !state.pipelineRunning {
+            if state.isSessionOpen, !state.pipelineRunning {
                 Text("記録停止後に実行できます")
                     .font(.caption2)
                     .foregroundStyle(.orange)
@@ -309,7 +309,7 @@ struct PopoverView: View {
                 IconButton(systemImage: "play.fill", label: "プレイブックを実行", tone: .accent) {
                     runSelectedPlaybook(only: nil)
                 }
-                .disabled(state.isRecording || selectedSession == nil)
+                .disabled(state.isSessionOpen || selectedSession == nil)
             }
         }
     }
@@ -319,7 +319,9 @@ struct PopoverView: View {
         case .idle:
             HStack(spacing: 2) {
                 Spacer()
-                if selectedSession?.title == nil {
+                // 記録中の記録には付けない（移すと記録が2つに割れる）。ボタンも出さない
+                if let selectedSession, selectedSession.title == nil,
+                   !state.openSessionNames.contains(selectedSession.directoryName) {
                     IconButton(systemImage: "text.badge.plus", label: "タイトルを生成") { runTitleAssignment() }
                 }
                 IconButton(systemImage: "play.fill", label: "生成を実行", tone: .accent) { runSelectedGeneration() }

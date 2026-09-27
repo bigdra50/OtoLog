@@ -36,16 +36,18 @@ extension AppSettings: LibraryGenerationSettings {}
                 saveDirectory: URL(fileURLWithPath: "/nonexistent", isDirectory: true),
                 claudeExecutableURL: URL(fileURLWithPath: "/nonexistent/claude")
             )
-        }
+        },
+        workLock: SessionWorkLock = .shared
     ) {
         self.run = run
         self.runPipeline = runPipeline
         currentEnvironment = environment
+        self.workLock = workLock
     }
 
     /// コーディネータはアプリの起動時に1度だけ作られる。
     /// 設定はここで写し取らず、実行を始めるたびに読む（ライブラリの一覧も表示のたびに今の保存先を読む）
-    convenience init(settings: some LibraryGenerationSettings) {
+    convenience init(settings: some LibraryGenerationSettings, workLock: SessionWorkLock = .shared) {
         self.init(run: { session, template, environment in
             let runner = PostProcessRunner(
                 directory: environment.saveDirectory,
@@ -57,7 +59,8 @@ extension AppSettings: LibraryGenerationSettings {}
                         allowWebResearch: template.allowsWebResearch,
                         jsonSchema: template.jsonSchema
                     )
-                )
+                ),
+                workLock: workLock
             )
             return try await runner.run(session: session, template: template)
         }, runPipeline: { session, playbook, only, environment in
@@ -77,12 +80,13 @@ extension AppSettings: LibraryGenerationSettings {}
                             jsonSchema: schemas[task.templateID] ?? nil
                         )
                     )
-                }
+                },
+                workLock: workLock
             )
             for await _ in await runner.run(playbook: playbook, session: session, only: only) {}
         }, environment: {
             Environment(saveDirectory: settings.saveDirectory, claudeExecutableURL: settings.claudeExecutableURL)
-        })
+        }, workLock: workLock)
     }
 
     // MARK: Internal
@@ -167,6 +171,7 @@ extension AppSettings: LibraryGenerationSettings {}
     private let run: Run
     private let runPipeline: RunPipeline?
     private let currentEnvironment: @MainActor () -> Environment
+    private let workLock: SessionWorkLock
     private var running: Set<Key> = []
     private var errors: [String: String] = [:]
 
@@ -177,6 +182,11 @@ extension AppSettings: LibraryGenerationSettings {}
         with environment: Environment
     ) async {
         guard let runPipeline else { return }
+        // 記録中のセッションには走らせない。PipelineRunner も断るが、ライブラリは実行の結果を読まないので、理由はここで出す
+        guard await !workLock.isOpen(session, in: environment.saveDirectory) else {
+            errors[session.id] = SessionWorkLockError.sessionIsOpen.errorDescription
+            return
+        }
         let label = only?.first ?? "playbook:\(playbook.id)"
         let key = Key(sessionID: session.id, templateID: label)
         guard !running.contains(key) else { return }

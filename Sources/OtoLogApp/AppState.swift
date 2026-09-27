@@ -40,6 +40,8 @@ struct PipelineTaskDisplay: Equatable, Identifiable {
 
     var generationState: GenerationState = .idle
     var generationSessions: [SessionRef] = []
+    /// generationSessions のうち、記録中のもの（SessionRef.directoryName）
+    var openSessionNames: Set<String> = []
     var generationTemplates: [GenerationTemplate] = []
 
     var pipelinePlaybooks: [Playbook] = []
