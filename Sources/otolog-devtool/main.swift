@@ -23,7 +23,7 @@ guard args.count >= 2 else {
 }
 
 // 起動中のアプリを制御ソケット経由で操作する（エージェント・自動化の正規経路）。
-// 応答は JSON 1行で、ok: false は exit 1、接続不可（アプリ未起動）は exit 69
+// 応答は JSON 1行で、ok: false は exit 1、接続不可（アプリ未起動）は exit 69、応答を待ちきれなかったときは exit 75
 if args[1] == "ctl" {
     guard args.count >= 3, let command = ControlCommand(rawValue: args[2]) else {
         FileHandle.standardError.write(Data("usage: otolog-devtool ctl <status|start|stop>\n".utf8))
@@ -39,6 +39,9 @@ if args[1] == "ctl" {
         encoder.outputFormatting = [.sortedKeys]
         try print(String(decoding: encoder.encode(response), as: UTF8.self))
         exit(response.ok ? 0 : 1)
+    } catch let error as ControlClientError {
+        FileHandle.standardError.write(Data("\(error.localizedDescription)\n".utf8))
+        exit(error.exitStatus)
     } catch {
         FileHandle.standardError.write(Data("\(error.localizedDescription)\n".utf8))
         exit(69)

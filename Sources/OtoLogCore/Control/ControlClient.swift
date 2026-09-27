@@ -36,12 +36,21 @@ public enum ControlClientError: Error, LocalizedError {
 
     // MARK: Public
 
+    /// ctl の終了コード（sysexits.h）。自動化が「アプリが無い」と「応答を待ちきれなかった」を分けて扱えるようにする。
+    /// 待ちきれなかったときは、アプリが処理を続けている（start がモデルの用意を待っている）ことがある
+    public var exitStatus: Int32 {
+        switch self {
+        case .connectionFailed: 69 // EX_UNAVAILABLE
+        case .timedOut: 75 // EX_TEMPFAIL
+        }
+    }
+
     public var errorDescription: String? {
         switch self {
         case let .connectionFailed(reason):
             "OtoLog に接続できません（アプリは起動していますか?）: \(reason)"
         case .timedOut:
-            "OtoLog からの応答がタイムアウトしました"
+            "OtoLog からの応答がタイムアウトしました。アプリは処理を続けている可能性があるため、ctl status で状態を確かめてください"
         }
     }
 }
