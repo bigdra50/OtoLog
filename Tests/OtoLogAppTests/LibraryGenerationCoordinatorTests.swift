@@ -473,7 +473,7 @@ import Testing
     private static func environment(saveDirectory: URL) -> LibraryGenerationCoordinator.Environment {
         LibraryGenerationCoordinator.Environment(
             saveDirectory: saveDirectory,
-            claudeExecutableURL: URL(fileURLWithPath: "/usr/local/bin/claude")
+            claudeExecutableURL: URL(fileURLWithPath: "/nonexistent/claude")
         )
     }
 }
