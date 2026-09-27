@@ -17,6 +17,14 @@ struct LanguageArbiter {
 
     // MARK: Internal
 
+    /// 途中経過を受け取った結果
+    struct VolatileOutcome: Equatable {
+        /// 字幕に出すテキスト。出さないなら nil
+        let display: String?
+        /// この途中経過で言語が決まったときに、溜めていた勝者の確定結果（到着順）
+        let released: [TranscriptSegment]
+    }
+
     private(set) var decidedLocale: String?
 
     /// 確定セグメントを受け取り、書き出してよいものを返す。
@@ -31,19 +39,20 @@ struct LanguageArbiter {
     }
 
     /// 途中経過を受け取り、表示すべきテキストを返す。
-    /// 未決定のあいだは最も長い結果を出している認識器のものを見せる（それらしく見えるため）
-    mutating func acceptVolatile(text: String, locale: String) -> String? {
+    /// 未決定のあいだは最も長い結果を出している認識器のものを見せる（それらしく見えるため）。
+    /// この途中経過で決まったときは、溜めた勝者の確定結果も返す。途中経過で決まっても、それより前の発話を落とさない
+    mutating func acceptVolatile(text: String, locale: String) -> VolatileOutcome {
         if let decidedLocale {
-            return locale == decidedLocale ? text : nil
+            return VolatileOutcome(display: locale == decidedLocale ? text : nil, released: [])
         }
         volatiles[locale] = text
         // volatile も判定材料に混ぜる。確定を待つと字幕がその分遅れる
         let merged = candidates.map { (locale: $0, text: (texts[$0] ?? "") + (volatiles[$0] ?? "")) }
         if let winner = LanguageDecider.decide(merged) {
-            settle(on: winner)
-            return volatiles[winner]
+            let released = settle(on: winner)
+            return VolatileOutcome(display: volatiles[winner], released: released)
         }
-        return volatiles.values.max { $0.count < $1.count }
+        return VolatileOutcome(display: volatiles.values.max { $0.count < $1.count }, released: [])
     }
 
     /// 入力終了。決まらないままなら候補の先頭で確定させ、溜めた分を落とさず出す
@@ -66,7 +75,8 @@ struct LanguageArbiter {
         return settle(on: winner)
     }
 
-    @discardableResult private mutating func settle(on locale: String) -> [TranscriptSegment] {
+    /// 決まった言語の保留分を返す。呼び出し側は必ず送り出す（捨てると判定を待つ間の発話が消える）
+    private mutating func settle(on locale: String) -> [TranscriptSegment] {
         decidedLocale = locale
         let flushed = backlog[locale] ?? []
         backlog.removeAll()

@@ -6,7 +6,8 @@ import Speech
 
 /// SpeechAnalyzer（macOS 26 オンデバイス認識）による TranscriptionEngine 実装。
 /// RecordingSession から直列に呼ばれる規約のもとで @unchecked Sendable として扱うが、
-/// 結果の購読はロケールごとに並行するため、裁定まわりだけはロックで守る。
+/// 結果の購読はロケールごとに並行するため、イベント列への送り出しと絞り込みの状態はロックで守る。
+/// 送り出し（裁定・入力の終わりの吐き出し）は Speech に依らない TranscriptEventRelay に分けてある
 public final class SpeechAnalyzerEngine: TranscriptionEngine, @unchecked Sendable {
     // MARK: Lifecycle
 
@@ -85,17 +86,18 @@ public final class SpeechAnalyzerEngine: TranscriptionEngine, @unchecked Sendabl
         self.inputContinuation = inputContinuation
 
         let (events, eventContinuation) = AsyncThrowingStream<TranscriptEvent, any Error>.makeStream()
-        self.eventContinuation = eventContinuation
-
+        let relay = TranscriptEventRelay(
+            candidates: transcribers.map { $0.locale.identifier(.bcp47) }, continuation: eventContinuation
+        )
         lock.withLock {
-            arbiter = LanguageArbiter(candidates: transcribers.map { $0.locale.identifier(.bcp47) })
+            self.relay = relay
             hasNarrowed = false
         }
 
         // results はライブ配信型で過去分を再送しないため、analyzer.start より先に購読を張る。
         // 短い入力では解析が購読より先に終わり、結果を取りこぼした挙句シーケンスも終端しない
         for entry in transcribers {
-            startResultsTask(for: entry, context: context, eventContinuation: eventContinuation)
+            startResultsTask(for: entry, context: context, relay: relay)
         }
 
         try await analyzer.start(inputSequence: inputSequence)
@@ -144,30 +146,24 @@ public final class SpeechAnalyzerEngine: TranscriptionEngine, @unchecked Sendabl
     private var transcribers: [Entry] = []
     private var analyzer: SpeechAnalyzer?
     private var inputContinuation: AsyncStream<AnalyzerInput>.Continuation?
-    private var eventContinuation: AsyncThrowingStream<TranscriptEvent, any Error>.Continuation?
     private var feedTask: Task<Void, Never>?
-    private var resultsTasks: [Task<Void, Never>] = []
-    private var arbiter: LanguageArbiter?
+    private var relay: TranscriptEventRelay?
     private var hasNarrowed = false
 
-    /// 入力終端後の確定とイベント列の閉鎖。feedTask と finish() の両方から到達し得るが、
-    /// finalize は try? で握り、finish は冪等なので二重実行しても害はない
+    /// 入力終端後の確定とイベント列の閉鎖。feedTask と finish() の両方から到達するが、進めるのは relay が1回だけにする
     private func drainAndFinish() async {
-        try? await analyzer?.finalizeAndFinishThroughEndOfInput()
-        Self.trace("finalize returned")
-        // 言語が決まらないまま終わったぶんを落とさずに出す
-        let remaining = lock.withLock { arbiter?.flush() ?? [] }
-        for segment in remaining {
-            eventContinuation?.yield(.finalized(segment))
+        guard let relay = lock.withLock({ relay }) else { return }
+        let analyzer = analyzer
+        await relay.drain {
+            try? await analyzer?.finalizeAndFinishThroughEndOfInput()
+            Self.trace("finalize returned")
         }
-        // results シーケンスの終端に依存せず、イベント列はここで確実に閉じる
-        eventContinuation?.finish()
     }
 
     private func startResultsTask(
         for entry: Entry,
         context: TranscriptionContext,
-        eventContinuation: AsyncThrowingStream<TranscriptEvent, any Error>.Continuation
+        relay: TranscriptEventRelay
     ) {
         let now = now
         // セグメントには実際に聞き取った認識器のロケールを入れる
@@ -188,13 +184,9 @@ public final class SpeechAnalyzerEngine: TranscriptionEngine, @unchecked Sendabl
 
                     switch event {
                     case let .volatile(text):
-                        if let shown = arbitrate(volatile: text, locale: moduleContext.locale) {
-                            eventContinuation.yield(.volatile(shown))
-                        }
+                        relay.relay(volatile: text, locale: moduleContext.locale)
                     case let .finalized(segment):
-                        for emitted in arbitrate(final: segment) {
-                            eventContinuation.yield(.finalized(emitted))
-                        }
+                        relay.relay(final: segment)
                     }
                     narrowIfDecided()
                 }
@@ -204,28 +196,14 @@ public final class SpeechAnalyzerEngine: TranscriptionEngine, @unchecked Sendabl
                 Self.trace("[\(moduleContext.locale)] results threw: \(error)")
             }
         }
-        resultsTasks.append(task)
-    }
-
-    private func arbitrate(final segment: TranscriptSegment) -> [TranscriptSegment] {
-        lock.withLock {
-            guard arbiter != nil else { return [segment] }
-            return arbiter!.accept(segment)
-        }
-    }
-
-    private func arbitrate(volatile text: String, locale: String) -> String? {
-        lock.withLock {
-            guard arbiter != nil else { return text }
-            return arbiter!.acceptVolatile(text: text, locale: locale)
-        }
+        relay.track(task)
     }
 
     /// 話者の言語が決まったら勝者だけに絞る。負けた認識器を回し続ける意味はない
     private func narrowIfDecided() {
         let winner: SpeechTranscriber? = lock.withLock {
             guard !hasNarrowed, transcribers.count > 1,
-                  let decided = arbiter?.decidedLocale,
+                  let decided = relay?.decidedLocale,
                   let entry = transcribers.first(where: { $0.locale.identifier(.bcp47) == decided })
             else { return nil }
             hasNarrowed = true
