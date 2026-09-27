@@ -93,16 +93,22 @@ import OtoLogCore
         }
     }
 
+    /// 準備中も止める。モデルのダウンロード中に止める手段を ctl stop だけにしない。
+    /// どちらの操作かは押した時点の表示で決める。閉じている途中は何もしない
     func toggle() {
+        let sessionState = state.sessionState
         let locales = recognitionLocales()
         let makeTranslator = translatorFactory()
         let feeds = makeFeeds(settings)
         let silenceTimeout = settings.silenceTimeout
         let startRequest = startRequestEntry(via: .popover)
-        Task { [session, state, recordingLog] in
-            if state.isRecording {
+        Task { [session, recordingLog] in
+            switch sessionState {
+            case .preparing, .recording:
                 await session.stop()
-            } else {
+            case .stopping:
+                break
+            case .idle, .failed:
                 recordingLog.record(startRequest)
                 await session.start(
                     feeds: feeds, locales: locales, makeTranslator: makeTranslator, silenceTimeout: silenceTimeout

@@ -102,6 +102,25 @@ import Testing
         await fixture.tearDown()
     }
 
+    // MARK: 記録ボタン
+
+    /// 認識モデルを準備している間（ダウンロードの途中など）も、ボタンで止められる。
+    /// ボタンは準備中も停止として表示する
+    @Test func 準備中に押すと記録を止める() async {
+        let preparing = HeldGate()
+        let fixture = RecordingCoordinatorFixture(preparing: preparing)
+        fixture.coordinator.startObserving()
+        fixture.coordinator.toggle()
+        #expect(await eventually { preparing.waitingCount == 1 })
+        #expect(await eventually { await MainActor.run { fixture.state.sessionState == .preparing } })
+
+        fixture.coordinator.toggle()
+
+        #expect(await eventually { await fixture.session.state == .idle })
+        preparing.open()
+        await fixture.tearDown()
+    }
+
     // MARK: 保存先の変更
 
     /// 開いている記録は元の保存先に書き続ける。閉じた記録を扱う処理は設定の保存先で記録を探すため、

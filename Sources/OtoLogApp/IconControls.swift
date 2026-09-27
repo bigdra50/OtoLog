@@ -63,35 +63,39 @@ struct IconButton: View {
 // MARK: - RecordButton
 
 /// 記録の開始/停止。ポップオーバー内で唯一の主役なので円形の塗りで置く。
+/// 閉じている途中（停止中）は押せないよう、呼び出し側で disabled にする
 struct RecordButton: View {
     // MARK: Internal
 
-    let isRecording: Bool
+    /// 押すと止める（準備中と記録中）。false なら押すと始める
+    let stops: Bool
     let action: () -> Void
 
     var body: some View {
         Button(action: action) {
-            Image(systemName: isRecording ? "stop.fill" : "mic.fill")
+            Image(systemName: stops ? "stop.fill" : "mic.fill")
                 .font(.system(size: 12, weight: .bold))
                 .foregroundStyle(.white)
                 .frame(width: 30, height: 30)
-                .background(isRecording ? AnyShapeStyle(.red) : AnyShapeStyle(.tint), in: Circle())
-                .scaleEffect(isHovering ? 1.06 : 1)
+                .background(stops ? AnyShapeStyle(.red) : AnyShapeStyle(.tint), in: Circle())
+                .opacity(isEnabled ? 1 : 0.4)
+                .scaleEffect(isHovering && isEnabled ? 1.06 : 1)
         }
         .buttonStyle(.plain)
         .help(label)
         .accessibilityLabel(label)
         .onHover { isHovering = $0 }
         .animation(.easeOut(duration: 0.12), value: isHovering)
-        .animation(.easeOut(duration: 0.15), value: isRecording)
+        .animation(.easeOut(duration: 0.15), value: stops)
     }
 
     // MARK: Private
 
+    @Environment(\.isEnabled) private var isEnabled
     @State private var isHovering = false
 
     private var label: String {
-        isRecording ? "記録を停止" : "記録を開始"
+        stops ? "記録を停止" : "記録を開始"
     }
 }
 
