@@ -51,6 +51,17 @@ import OtoLogCore
         }
     }
 
+    /// 実行中のパイプラインが終わるのを待ってから走らせる。停止後の自動処理が、利用者の実行と重なったときに何の表示もなく飛ばされないようにする。
+    /// 戻ったら await を挟まずに run する（挟むと、その間に利用者が始めた実行と重なる）
+    func runWhenIdle(playbook: Playbook, session: SessionRef, in saveDirectory: URL) async {
+        var waited: Task<Void, Never>?
+        while state.pipelineRunning, let running = pipelineTask, running != waited {
+            await running.value
+            waited = running
+        }
+        run(playbook: playbook, session: session, in: saveDirectory)
+    }
+
     /// saveDirectory は session がある保存先。省略すると今の設定の保存先を使う
     func run(playbook: Playbook, session: SessionRef, only: [String]? = nil, in saveDirectory: URL? = nil) {
         guard !state.pipelineRunning else { return }

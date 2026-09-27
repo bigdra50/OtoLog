@@ -109,12 +109,14 @@ import OtoLogCore
 
     /// 停止時の自動処理。タイトル生成が失敗した場合はパイプラインへ連鎖しない（手動で対処する）。
     /// 発話の無い記録には走らせない。タイトル生成が必ず失敗し、無音のまま自動停止した記録などでは、その失敗だけが表示に残るため。
+    /// 利用者が始めた生成が走っていれば、終わるのを待ってから始める。生成の枠は1つで、飛ばすと何も表示されないまま残る。
     /// テストが停止イベントを経ずに呼んで確かめられるよう、private にしない
     func runPostStopAction(for ref: SessionRef, in saveDirectory: URL) async {
         let action = settings.postStopAction
         guard action != .none else { return }
         let reader = TranscriptReader(directory: saveDirectory, timeZone: .current)
         guard await OffMainIO.read({ reader.hasSpeech(in: ref) }) else { return }
+        await waitUntilGenerationIsIdle()
         switch action {
         case .none:
             break
@@ -197,19 +199,38 @@ import OtoLogCore
     private let workLock: SessionWorkLock
     private var generationTask: Task<Void, Never>?
 
-    /// saveDirectory は session がある保存先。判定とパイプラインはこの保存先で記録を探す
+    /// 生成の枠（generationState）が空くまで待つ。戻ったら await を挟まずに生成を始めること。
+    /// 挟むと、その間に利用者が始めた生成と重なる
+    private func waitUntilGenerationIsIdle() async {
+        var waited: Task<Void, Never>?
+        // 同じタスクを二度待たない。終わったタスクの後に枠が空いていなければ、そのまま始める側の判断に任せる
+        while case .running = state.generationState, let running = generationTask, running != waited {
+            await running.value
+            waited = running
+        }
+    }
+
+    /// saveDirectory は session がある保存先。判定とパイプラインはこの保存先で記録を探す。
+    /// 判定は生成の枠を、プレイブックはパイプラインの枠を使うので、それぞれ空くのを待ってから始める。
+    /// 待たずに始めると、判定は実行中の生成の表示と取り消し先を奪い、プレイブックは何も表示せずに飛ばされる
     private func runDefaultPlaybook(session: SessionRef, in saveDirectory: URL) {
         guard let pipeline else { return }
         pipeline.refresh()
         let playbooks = state.pipelinePlaybooks
         if settings.defaultPlaybookID == AppSettings.autoPlaybookID {
-            classifyThenRun(session: session, candidates: playbooks, in: saveDirectory)
+            Task { [weak self] in
+                await self?.waitUntilGenerationIsIdle()
+                self?.classifyThenRun(session: session, candidates: playbooks, in: saveDirectory)
+            }
         } else if let playbook = playbooks.first(where: { $0.id == settings.defaultPlaybookID }) ?? playbooks.first {
-            pipeline.run(playbook: playbook, session: session, in: saveDirectory)
+            Task {
+                await pipeline.runWhenIdle(playbook: playbook, session: session, in: saveDirectory)
+            }
         }
     }
 
-    /// 内容ベースの自動判定（haiku）。判定不能なら実行せず、手動対処を促す表示を出す
+    /// 内容ベースの自動判定（haiku）。判定不能なら実行せず、手動対処を促す表示を出す。
+    /// 生成の枠が空いてから呼ぶ（runDefaultPlaybook が待つ）
     private func classifyThenRun(session: SessionRef, candidates: [Playbook], in saveDirectory: URL) {
         state.generationState = .running(templateName: "プレイブック判定")
         let classifier = SessionClassifier(
@@ -224,9 +245,11 @@ import OtoLogCore
             do {
                 let selected = try await classifier.classify(session: session, candidates: candidates)
                 state.generationState = .idle
-                if let selected {
-                    self?.pipeline?.run(playbook: selected, session: session, in: saveDirectory)
-                } else {
+                if let selected, let pipeline = self?.pipeline {
+                    Task {
+                        await pipeline.runWhenIdle(playbook: selected, session: session, in: saveDirectory)
+                    }
+                } else if selected == nil {
                     state.generationState = .failed("プレイブックを判定できませんでした。手動で実行してください")
                 }
             } catch is CancellationError {
