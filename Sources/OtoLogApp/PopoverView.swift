@@ -116,8 +116,9 @@ struct PopoverView: View {
                 .font(.system(.subheadline, weight: .semibold))
                 .foregroundStyle(state.isRecording ? AnyShapeStyle(.primary) : AnyShapeStyle(.secondary))
             Spacer(minLength: 8)
-            RecordButton(isRecording: state.isRecording) { coordinator.toggle() }
+            RecordButton(stops: state.canStop) { coordinator.toggle() }
                 .keyboardShortcut(.defaultAction)
+                .disabled(state.sessionState == .stopping)
         }
     }
 

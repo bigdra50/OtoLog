@@ -54,6 +54,11 @@ struct PipelineTaskDisplay: Equatable, Identifiable {
         sessionState == .recording
     }
 
+    /// 記録ボタンで止められる間（準備中と記録中）。準備中はモデルのダウンロードに時間がかかることがある
+    var canStop: Bool {
+        sessionState == .preparing || sessionState == .recording
+    }
+
     /// 記録が開いている間（準備・記録・閉じる処理の途中）。この間は保存先を変えない
     var isSessionOpen: Bool {
         switch sessionState {

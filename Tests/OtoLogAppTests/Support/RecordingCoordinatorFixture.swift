@@ -7,11 +7,12 @@ import OtoLogCore
 
 /// RecordingCoordinator を、実利用中の設定と recording.log に触れずに組み立てる。
 /// 設定は専用の defaults に、保存先と recording.log は一時フォルダに向ける。
-/// 記録は音声を流さないフィードで始まり、実デバイスと SpeechAnalyzer は使わない
+/// 記録は音声を流さないフィードで始まり、実デバイスと SpeechAnalyzer は使わない。
+/// preparing と finishing を渡すと、エンジンの準備と終わりをそこで止めておける（開始の途中と閉じる途中を再現する）
 @MainActor struct RecordingCoordinatorFixture {
     // MARK: Lifecycle
 
-    init() {
+    init(preparing: HeldGate? = nil, finishing: HeldGate? = nil) {
         let suiteName = "OtoLogAppTests.recording-coordinator-\(UUID().uuidString)"
         let root = FileManager.default.temporaryDirectory
             .appendingPathComponent("OtoLogAppTests-\(UUID().uuidString)", isDirectory: true)
@@ -28,7 +29,11 @@ import OtoLogCore
             settings: settings,
             recordingLog: RecordingLog(fileURL: root.appendingPathComponent("recording.log"), queue: logQueue),
             makeFeeds: { _ in
-                [RecordingFeed(capture: SilentCaptureSource(), engine: SilentTranscriptionEngine(), kind: .system)]
+                [RecordingFeed(
+                    capture: SilentCaptureSource(),
+                    engine: SilentTranscriptionEngine(preparing: preparing, finishing: finishing),
+                    kind: .system
+                )]
             }
         )
         self.sleeps = sleeps
@@ -109,10 +114,18 @@ final class SilentCaptureSource: AudioCaptureSource, @unchecked Sendable {
 
 /// 結果を出さないエンジン。finish でイベント列を閉じる
 final class SilentTranscriptionEngine: TranscriptionEngine, @unchecked Sendable {
+    // MARK: Lifecycle
+
+    init(preparing: HeldGate? = nil, finishing: HeldGate? = nil) {
+        self.preparing = preparing
+        self.finishing = finishing
+    }
+
     // MARK: Internal
 
     func prepare(locales _: [Locale], onProgress _: @escaping @Sendable (Double) -> Void) async throws -> AVAudioFormat {
-        AVAudioFormat(standardFormatWithSampleRate: 16000, channels: 1)!
+        await preparing?.pass()
+        return AVAudioFormat(standardFormatWithSampleRate: 16000, channels: 1)!
     }
 
     func start(
@@ -125,13 +138,59 @@ final class SilentTranscriptionEngine: TranscriptionEngine, @unchecked Sendable 
     }
 
     func finish() async {
+        await finishing?.pass()
         lock.withLock { continuation }?.finish()
     }
 
     // MARK: Private
 
+    private let preparing: HeldGate?
+    private let finishing: HeldGate?
     private let lock = NSLock()
     private var continuation: AsyncThrowingStream<TranscriptEvent, any Error>.Continuation?
+}
+
+// MARK: - HeldGate
+
+/// 開くまで通さない関門。開いた後は素通しする
+final class HeldGate: @unchecked Sendable {
+    // MARK: Internal
+
+    /// 関門で待っている呼び出しの数
+    var waitingCount: Int {
+        lock.withLock { waiters.count }
+    }
+
+    func pass() async {
+        await withCheckedContinuation { continuation in
+            let waits = lock.withLock {
+                if !isOpen {
+                    waiters.append(continuation)
+                }
+                return !isOpen
+            }
+            if !waits {
+                continuation.resume()
+            }
+        }
+    }
+
+    func open() {
+        let pending = lock.withLock {
+            isOpen = true
+            defer { waiters.removeAll() }
+            return waiters
+        }
+        for waiter in pending {
+            waiter.resume()
+        }
+    }
+
+    // MARK: Private
+
+    private let lock = NSLock()
+    private var isOpen = false
+    private var waiters: [CheckedContinuation<Void, Never>] = []
 }
 
 // MARK: - DiscardingTranscriptStore
