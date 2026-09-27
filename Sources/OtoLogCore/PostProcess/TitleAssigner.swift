@@ -13,9 +13,11 @@ public struct TitleAssigner: Sendable {
         timeZone: TimeZone,
         generator: any TextGenerator,
         correctionStore: CorrectionDictionaryStore? = CorrectionDictionaryStore(),
-        maxSampleCharacters: Int = 4000
+        maxSampleCharacters: Int = 4000,
+        workLock: SessionWorkLock = .shared
     ) {
         self.saveDirectory = saveDirectory
+        self.workLock = workLock
         self.timeZone = timeZone
         self.generator = generator
         self.correctionStore = correctionStore
@@ -24,7 +26,13 @@ public struct TitleAssigner: Sendable {
 
     // MARK: Public
 
+    /// 記録中の記録には付けない（SessionWorkLockError.sessionIsOpen）。移すと保存が元の名前でディレクトリを作り直し、記録が2つに割れる。
+    /// 生成は同じ記録のほかの作業と並んで走らせ、移すのは同じ記録のほかの作業が終わってからにする
     public func assignTitle(to ref: SessionRef) async throws -> SessionRef {
+        // 生成を待たせずに断る。受け持つときにも断るが、それでは haiku の応答を待った後になる
+        guard await !workLock.isOpen(ref, in: saveDirectory) else {
+            throw SessionWorkLockError.sessionIsOpen
+        }
         let reader = TranscriptReader(directory: saveDirectory, timeZone: timeZone)
         let segments = try reader.segments(in: ref)
         guard !segments.isEmpty else {
@@ -44,6 +52,30 @@ public struct TitleAssigner: Sendable {
             throw TitleAssignerError.unusableTitle(generated: generated)
         }
 
+        let lease = try await workLock.acquire(.retitle, for: ref, in: saveDirectory)
+        let renamed: SessionRef
+        do {
+            // 待つ間にほかのタイトル付与が移していれば、移った先から移す
+            renamed = try move(lease.session, to: title)
+        } catch {
+            await workLock.release(lease)
+            throw error
+        }
+        await workLock.release(lease, movedTo: renamed)
+        return renamed
+    }
+
+    // MARK: Private
+
+    private let saveDirectory: URL
+    private let timeZone: TimeZone
+    private let generator: any TextGenerator
+    private let correctionStore: CorrectionDictionaryStore?
+    private let maxSampleCharacters: Int
+    private let workLock: SessionWorkLock
+
+    /// meta.json にタイトルを書き、ディレクトリをタイトル名へ移して、transcript.md の見出しを差し替える
+    private func move(_ ref: SessionRef, to title: String) throws -> SessionRef {
         let oldDir = saveDirectory.appendingPathComponent(ref.directoryName)
 
         var meta = try SessionMetaCoder.decode(Data(contentsOf: oldDir.appendingPathComponent("meta.json")))
@@ -74,14 +106,6 @@ public struct TitleAssigner: Sendable {
         rewriteMarkdownHeading(in: newDir, title: title)
         return SessionRef(directoryName: newRelativePath, title: title, startedAt: ref.startedAt)
     }
-
-    // MARK: Private
-
-    private let saveDirectory: URL
-    private let timeZone: TimeZone
-    private let generator: any TextGenerator
-    private let correctionStore: CorrectionDictionaryStore?
-    private let maxSampleCharacters: Int
 
     private func prompt(for segments: [TranscriptSegment]) -> String {
         let full = segments

@@ -15,9 +15,11 @@ public struct PostProcessRunner: Sendable {
         knowledgeStore: KnowledgeStore? = KnowledgeStore(),
         situationStore: SituationStore? = SituationStore(),
         maxPromptCharacters: Int = 150_000,
+        workLock: SessionWorkLock = .shared,
         now: @escaping @Sendable () -> Date = Date.init
     ) {
         self.directory = directory
+        self.workLock = workLock
         self.timeZone = timeZone
         self.generator = generator
         self.correctionStore = correctionStore
@@ -53,8 +55,58 @@ public struct PostProcessRunner: Sendable {
         return formatter.date(from: String(match.1))
     }
 
-    /// 成功時は書き出した生成物の URL を返す
+    /// 成功時は書き出した生成物の URL を返す。
+    /// 記録中の記録でも生成する（その時点までの内容で作る）。タイトル付与がこの記録を移している間は待ち、移った先で生成する
     public func run(session: SessionRef, template: GenerationTemplate) async throws -> URL {
+        let lease = try await workLock.acquire(.generation, for: session, in: directory)
+        do {
+            let url = try await generate(session: lease.session, template: template)
+            await workLock.release(lease)
+            return url
+        } catch {
+            await workLock.release(lease)
+            throw error
+        }
+    }
+
+    public func outputURL(session: SessionRef, templateID: String) -> URL {
+        directory.appendingPathComponent(session.directoryName).appendingPathComponent("\(templateID).md")
+    }
+
+    // MARK: Internal
+
+    /// モデルが指示に反して出力全体をコードフェンスで包んだ場合に剥がす（PipelineRunner と共用）
+    static func stripWrappingCodeFence(_ text: String) -> String {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        var lines = trimmed.split(separator: "\n", omittingEmptySubsequences: false)
+        guard lines.count >= 2,
+              lines.first?.hasPrefix("```") == true,
+              lines.last?.hasPrefix("```") == true
+        else { return trimmed }
+        lines.removeFirst()
+        lines.removeLast()
+        return lines.joined(separator: "\n").trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    static func iso8601(_ date: Date) -> String {
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = [.withInternetDateTime]
+        return formatter.string(from: date)
+    }
+
+    // MARK: Private
+
+    private let directory: URL
+    private let timeZone: TimeZone
+    private let generator: any TextGenerator
+    private let correctionStore: CorrectionDictionaryStore?
+    private let knowledgeStore: KnowledgeStore?
+    private let situationStore: SituationStore?
+    private let maxPromptCharacters: Int
+    private let workLock: SessionWorkLock
+    private let now: @Sendable () -> Date
+
+    private func generate(session: SessionRef, template: GenerationTemplate) async throws -> URL {
         let segments = try TranscriptReader(directory: directory, timeZone: timeZone).segments(in: session)
         guard !segments.isEmpty else {
             throw PostProcessError.emptyTranscript(session: session.displayName)
@@ -110,42 +162,6 @@ public struct PostProcessRunner: Sendable {
         }
         return url
     }
-
-    public func outputURL(session: SessionRef, templateID: String) -> URL {
-        directory.appendingPathComponent(session.directoryName).appendingPathComponent("\(templateID).md")
-    }
-
-    // MARK: Internal
-
-    /// モデルが指示に反して出力全体をコードフェンスで包んだ場合に剥がす（PipelineRunner と共用）
-    static func stripWrappingCodeFence(_ text: String) -> String {
-        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
-        var lines = trimmed.split(separator: "\n", omittingEmptySubsequences: false)
-        guard lines.count >= 2,
-              lines.first?.hasPrefix("```") == true,
-              lines.last?.hasPrefix("```") == true
-        else { return trimmed }
-        lines.removeFirst()
-        lines.removeLast()
-        return lines.joined(separator: "\n").trimmingCharacters(in: .whitespacesAndNewlines)
-    }
-
-    static func iso8601(_ date: Date) -> String {
-        let formatter = ISO8601DateFormatter()
-        formatter.formatOptions = [.withInternetDateTime]
-        return formatter.string(from: date)
-    }
-
-    // MARK: Private
-
-    private let directory: URL
-    private let timeZone: TimeZone
-    private let generator: any TextGenerator
-    private let correctionStore: CorrectionDictionaryStore?
-    private let knowledgeStore: KnowledgeStore?
-    private let situationStore: SituationStore?
-    private let maxPromptCharacters: Int
-    private let now: @Sendable () -> Date
 }
 
 // MARK: - PostProcessError

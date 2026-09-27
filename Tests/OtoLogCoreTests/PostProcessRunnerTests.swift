@@ -118,13 +118,45 @@ struct PostProcessRunnerTests {
         #expect(PostProcessRunner.provenanceGeneratedAt("本文だけ") == nil)
     }
 
+    /// タイトル付与がディレクトリを移すのを待っていた生成は、移った先へ書く。移る前の場所へ書こうとして失敗しない
+    @Test func generationWaitingForARetitleWritesIntoTheNewPlace() async throws {
+        try await withTempDir { dir in
+            try writeTranscript(["こんにちは"], to: dir)
+            let lock = SessionWorkLock()
+            let retitle = try await lock.acquire(.retitle, for: session, in: dir)
+            let runner = makeRunner(directory: dir, generator: FakeTextGenerator(result: "議事録"), workLock: lock)
+            let generating = Task { try await runner.run(session: session, template: template) }
+            #expect(await eventually { await lock.waitingCount(for: session, in: dir) == 1 })
+
+            // タイトル付与が移し終えたところ
+            let moved = SessionRef(directoryName: "2026-07-29/定例会議", title: "定例会議", startedAt: session.startedAt)
+            try FileManager.default.createDirectory(
+                at: dir.appendingPathComponent("2026-07-29"), withIntermediateDirectories: true
+            )
+            try FileManager.default.moveItem(
+                at: dir.appendingPathComponent(session.directoryName),
+                to: dir.appendingPathComponent(moved.directoryName)
+            )
+            await lock.release(retitle, movedTo: moved)
+
+            let url = try await generating.value
+            #expect(url.path.hasSuffix("2026-07-29/定例会議/minutes.md"))
+            #expect(FileManager.default.fileExists(atPath: url.path))
+        }
+    }
+
     // MARK: Private
 
-    private func makeRunner(directory: URL, generator: FakeTextGenerator) -> PostProcessRunner {
+    private func makeRunner(
+        directory: URL,
+        generator: FakeTextGenerator,
+        workLock: SessionWorkLock = SessionWorkLock()
+    ) -> PostProcessRunner {
         PostProcessRunner(
             directory: directory, timeZone: jst, generator: generator,
             // テストから実 config を読み書きしない。既定のままだと結果が手元の設定に依存する
             correctionStore: nil, knowledgeStore: nil, situationStore: nil,
+            workLock: workLock,
             now: { Date(timeIntervalSince1970: 1_785_297_600) }
         )
     }

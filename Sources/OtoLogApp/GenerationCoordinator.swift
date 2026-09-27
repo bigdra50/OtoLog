@@ -7,9 +7,10 @@ import OtoLogCore
 @MainActor final class GenerationCoordinator {
     // MARK: Lifecycle
 
-    init(state: AppState, settings: AppSettings) {
+    init(state: AppState, settings: AppSettings, workLock: SessionWorkLock = .shared) {
         self.state = state
         self.settings = settings
+        self.workLock = workLock
     }
 
     // MARK: Internal
@@ -17,7 +18,7 @@ import OtoLogCore
     /// 停止時の自動連鎖でパイプラインを起動するための参照（AppDelegate が配線する）
     weak var pipeline: PipelineCoordinator?
 
-    /// 生成セクションの展開時に呼ぶ。対象セッションとテンプレートを読み直す
+    /// 生成セクションの展開時に呼ぶ。対象セッションとテンプレートと、そのうち記録中のものを読み直す
     func refresh() async {
         let directory = settings.saveDirectory
         let (sessions, templates) = await OffMainIO.read {
@@ -28,6 +29,7 @@ import OtoLogCore
         }
         state.generationSessions = sessions
         state.generationTemplates = templates
+        state.openSessionNames = await workLock.openSessionNames(in: directory)
     }
 
     func generate(session: SessionRef, template: GenerationTemplate) {
@@ -44,7 +46,8 @@ import OtoLogCore
                     allowWebResearch: template.allowsWebResearch,
                     jsonSchema: template.jsonSchema
                 )
-            )
+            ),
+            workLock: workLock
         )
         generationTask = Task { [state] in
             do {
@@ -74,7 +77,8 @@ import OtoLogCore
             generator: ClaudeCLIGenerator(
                 executableURL: settings.claudeExecutableURL,
                 arguments: ClaudeCLIGenerator.arguments(model: .haiku, allowWebResearch: false)
-            )
+            ),
+            workLock: workLock
         )
         generationTask = Task { [state, weak self] in
             do {
@@ -123,10 +127,13 @@ import OtoLogCore
         }
     }
 
-    /// 未処理（タイトルなし/パイプライン未実行）セッションを検出して表示用状態を更新する
+    /// 未処理（タイトルなし/パイプライン未実行）セッションを検出して表示用状態を更新する。
+    /// 記録中の記録は、24時間を超えて続いていても出さない
     func refreshSteward() async {
-        let steward = SessionSteward(saveDirectory: settings.saveDirectory, timeZone: .current)
-        state.stewardFindings = await OffMainIO.read { steward.findings() }
+        let directory = settings.saveDirectory
+        let steward = SessionSteward(saveDirectory: directory, timeZone: .current)
+        let open = await workLock.openSessionNames(in: directory)
+        state.stewardFindings = await OffMainIO.read { steward.findings(excluding: open) }
     }
 
     /// 最も新しい未処理セッション1件をフル処理する（タイトル → 自動判定 → パイプライン）。
@@ -187,6 +194,7 @@ import OtoLogCore
 
     private let state: AppState
     private let settings: AppSettings
+    private let workLock: SessionWorkLock
     private var generationTask: Task<Void, Never>?
 
     /// saveDirectory は session がある保存先。判定とパイプラインはこの保存先で記録を探す

@@ -42,6 +42,18 @@ struct SessionStewardTests {
         }
     }
 
+    /// 開いている記録は、開始から古くても対象外。24時間を超えて続いている記録を、クラッシュの残骸として処理させない
+    @Test func skipsSessionsThatAreStillRecording() throws {
+        try withTempDir { root in
+            try makeSession(in: root, name: "2026-07-27_0900", title: nil, playbookID: nil, ended: false)
+
+            let findings = SessionSteward(saveDirectory: root, timeZone: jst)
+                .findings(now: now, excluding: ["2026-07-27_0900"])
+
+            #expect(findings.isEmpty)
+        }
+    }
+
     // MARK: Private
 
     private func makeSession(

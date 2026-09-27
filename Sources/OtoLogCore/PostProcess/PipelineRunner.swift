@@ -17,6 +17,7 @@ public enum PipelineEvent: Sendable, Equatable {
 /// - correct に依存する下流タスクは、ログ本文を校正結果に差し替えて実行する
 /// - correct 以外の依存出力は「依存タスクの結果」としてプロンプトに添付する（統合系タスク用）
 /// - 状態は meta.json に永続化し、`only` 指定で失敗タスクだけの再実行ができる
+/// - 記録中の記録には走らせない。同じ記録のパイプラインとタイトル付与とは重ねず、終わるのを待つ（SessionWorkLock）
 public actor PipelineRunner {
     // MARK: Lifecycle
 
@@ -30,8 +31,10 @@ public actor PipelineRunner {
         maxConcurrent: Int = 2,
         maxPromptCharacters: Int = 150_000,
         correctionChunkCharacters: Int = 12_000,
+        workLock: SessionWorkLock = .shared,
         now: @escaping @Sendable () -> Date = Date.init
     ) {
+        self.workLock = workLock
         self.saveDirectory = saveDirectory
         self.timeZone = timeZone
         self.generatorFactory = generatorFactory
@@ -47,14 +50,16 @@ public actor PipelineRunner {
     // MARK: Public
 
     /// 実行を開始し進捗イベント列を返す。only 指定時はそのタスクだけを再実行し、
-    /// 依存の充足は meta.json に記録された done とその出力ファイルを再利用する
+    /// 依存の充足は meta.json に記録された done とその出力ファイルを再利用する。
+    /// 記録中の記録には走らせず、対象のタスクを理由つきの失敗として流す
     public func run(
         playbook: Playbook,
         session: SessionRef,
         only: [String]? = nil
     ) -> AsyncStream<PipelineEvent> {
         let (stream, continuation) = AsyncStream.makeStream(of: PipelineEvent.self)
-        guard context == nil else {
+        // 同じ記録の受け持ちを待つ間も実行中として扱う。context は受け持った後に作るので、それで見ると二重に起動できる
+        guard runTask == nil else {
             continuation.yield(.finished(done: 0, failed: 0, skipped: 0))
             continuation.finish()
             return stream
@@ -110,6 +115,7 @@ public actor PipelineRunner {
     private let correctionChunkCharacters: Int
 
     private let now: @Sendable () -> Date
+    private let workLock: SessionWorkLock
 
     private var runTask: Task<Void, Never>?
     private var context: RunContext?
@@ -147,7 +153,45 @@ public actor PipelineRunner {
         defer {
             continuation.finish()
             context = nil
+            runTask = nil
         }
+        let lease: SessionWorkLock.Lease
+        do {
+            lease = try await workLock.acquire(.pipeline, for: session, in: saveDirectory)
+        } catch {
+            reportNotStarted(error, targets: only ?? playbook.tasks.map(\.id), continuation: continuation)
+            return
+        }
+        // 待つ間にタイトル付与で移っていれば、移った先で走らせる
+        await execute(playbook: playbook, session: lease.session, only: only, holding: continuation)
+        await workLock.release(lease)
+    }
+
+    /// 始められなかった実行を知らせる。meta.json には書かない（開いている記録なら、閉じるときの書き直しとぶつかる）。
+    /// 待つ間に取り消されたときは、何も始めていないので失敗としては知らせない
+    private func reportNotStarted(
+        _ error: any Error,
+        targets: [String],
+        continuation: AsyncStream<PipelineEvent>.Continuation
+    ) {
+        guard !(error is CancellationError) else {
+            continuation.yield(.finished(done: 0, failed: 0, skipped: 0))
+            return
+        }
+        let failed = PipelineTaskState(status: .failed, error: error.localizedDescription)
+        for id in targets {
+            continuation.yield(.taskStateChanged(taskID: id, state: failed))
+        }
+        continuation.yield(.finished(done: 0, failed: targets.count, skipped: 0))
+    }
+
+    /// 記録を受け持ってからの実行
+    private func execute(
+        playbook: Playbook,
+        session: SessionRef,
+        only: [String]?,
+        holding continuation: AsyncStream<PipelineEvent>.Continuation
+    ) async {
         let sessionDirectory = saveDirectory.appendingPathComponent(session.directoryName)
         let templates = templateStore.loadTemplates()
         let segments = (try? TranscriptReader(directory: saveDirectory, timeZone: timeZone)
@@ -471,8 +515,9 @@ public actor PipelineRunner {
         return try? SessionMetaCoder.decode(data)
     }
 
-    /// 状態変化のたびに meta.json へ反映する（このランナーが唯一の書き手）。
-    /// meta が読めない場合は永続化をあきらめて実行は続ける
+    /// 状態変化のたびに meta.json を読み直して、プレイブックと状態だけを書く。
+    /// ほかの書き手（保存の開閉、タイトル付与、同じ記録の別のパイプライン）とは SessionWorkLock で重ならないため、
+    /// 読み直せば互いの項目を消さない。meta が読めない場合は永続化をあきらめて実行は続ける
     private func writeMeta(in sessionDirectory: URL, playbookID: String, pipeline: [String: PipelineTaskState]) {
         guard var meta = readMeta(in: sessionDirectory) else { return }
         meta.playbookID = playbookID
