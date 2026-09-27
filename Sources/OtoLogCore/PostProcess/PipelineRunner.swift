@@ -50,7 +50,7 @@ public actor PipelineRunner {
     // MARK: Public
 
     /// 実行を開始し進捗イベント列を返す。only 指定時はそのタスクだけを再実行し、
-    /// 依存の充足は meta.json に記録された done とその出力ファイルを再利用する。
+    /// 依存の充足は meta.json に記録された done とその出力ファイルを再利用する。done でない依存先は一緒に走らせる。
     /// 記録中の記録には走らせず、対象のタスクを理由つきの失敗として流す
     public func run(
         playbook: Playbook,
@@ -144,6 +144,26 @@ public actor PipelineRunner {
         return (text, [])
     }
 
+    /// only 指定でも、done でない依存先は一緒に走らせる（make と同じく、対象に要るものを作り直す）。
+    /// 依存先が pending や running のまま残っていると（取り消しや強制終了の跡）、対象は起動も skip もされずに実行が終わる。
+    /// skip にしないのは、ライブラリの単発生成が only 指定の再実行になるため。skip では頼んだ生成物が作られず、理由も画面に出ない
+    private static func targets(
+        requested: [String],
+        in playbook: Playbook,
+        previous: [String: PipelineTaskState]
+    ) -> [String] {
+        var targets = requested
+        var unvisited = requested
+        while let id = unvisited.popLast() {
+            let dependencies = playbook.tasks.first { $0.id == id }?.dependsOn ?? []
+            for dependency in dependencies where previous[dependency]?.status != .done && !targets.contains(dependency) {
+                targets.append(dependency)
+                unvisited.append(dependency)
+            }
+        }
+        return targets
+    }
+
     private func execute(
         playbook: Playbook,
         session: SessionRef,
@@ -205,7 +225,7 @@ public actor PipelineRunner {
         let previousMeta = readMeta(in: sessionDirectory)
         let previous = (previousMeta?.playbookID == playbook.id ? previousMeta?.pipeline : nil) ?? [:]
 
-        let targetIDs = only ?? playbook.tasks.map(\.id)
+        let targetIDs = Self.targets(requested: only ?? playbook.tasks.map(\.id), in: playbook, previous: previous)
         let targetSet = Set(targetIDs)
 
         taskStates = [:]

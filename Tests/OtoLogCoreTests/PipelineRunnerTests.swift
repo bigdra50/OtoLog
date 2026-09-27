@@ -427,6 +427,47 @@ struct PipelineRunnerTests {
         }
     }
 
+    // MARK: only 指定の再実行で、依存先が済んでいないとき
+
+    /// 依存先が済んでいなければ、依存先も走らせてから対象を走らせる。
+    /// 取り消しや強制終了で依存先が pending や running のまま残っていても、対象を起動も skip もしないまま終えない
+    @Test(.timeLimit(.minutes(1)), arguments: [PipelineTaskState.Status.pending, .running, .failed, .skipped, nil]) func onlyAlsoRunsDependenciesThatAreNotDone(previous: PipelineTaskState.Status?) async throws {
+        try await withSessionDir { root, sessionDir in
+            let playbook = Playbook(id: "p", displayName: "p", tasks: [
+                PlaybookTask(templateID: "correct", model: .sonnet),
+                PlaybookTask(templateID: "summary", model: .sonnet, dependsOn: ["correct"]),
+            ])
+            var meta = try SessionMetaCoder.decode(Data(contentsOf: sessionDir.appendingPathComponent("meta.json")))
+            meta.playbookID = "p"
+            var pipeline = ["summary": PipelineTaskState(status: .done, outputFile: "summary.md")]
+            if let previous {
+                pipeline["correct"] = PipelineTaskState(status: previous)
+            }
+            meta.pipeline = pipeline
+            try SessionMetaCoder.encode(meta).write(to: sessionDir.appendingPathComponent("meta.json"))
+            let summaryGenerator = FakeTextGenerator(result: "作り直した要約")
+            let runner = makeRunner(root: root, generators: [
+                "correct": FakeTextGenerator(result: "[13:00:00] 校正し直した本文GHI"),
+                "summary": summaryGenerator,
+            ])
+
+            var finished: (done: Int, failed: Int, skipped: Int)?
+            for await event in await runner.run(playbook: playbook, session: session, only: ["summary"]) {
+                if case let .finished(done, failed, skipped) = event {
+                    finished = (done, failed, skipped)
+                }
+            }
+
+            #expect(finished! == (done: 2, failed: 0, skipped: 0))
+            #expect(summaryGenerator.receivedPrompts.first?.contains("校正し直した本文GHI") == true)
+            let updated = try SessionMetaCoder.decode(
+                Data(contentsOf: sessionDir.appendingPathComponent("meta.json"))
+            )
+            #expect(updated.pipeline?["correct"]?.status == .done)
+            #expect(updated.pipeline?["summary"]?.status == .done)
+        }
+    }
+
     // MARK: 記録中と、同じ記録のほかの作業
 
     /// 記録中の記録には走らせない。対象のタスクは理由つきの失敗として知らせ、meta.json には触れない。
