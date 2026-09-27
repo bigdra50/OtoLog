@@ -121,6 +121,29 @@ struct ControlServerTests {
         }
     }
 
+    /// 応答を待ちきれなかったときは、接続できなかったときと区別して知らせる。アプリは処理を続けている
+    @Test func timesOutWhenTheAppAnswersTooLate() async throws {
+        try await withServer(handler: { _ in
+            try? await Task.sleep(for: .seconds(2))
+            return ControlResponse(ok: true)
+        }) { socketPath in
+            do {
+                _ = try await ControlClient.send(
+                    ControlRequest(command: .start), socketPath: socketPath, timeout: .milliseconds(200)
+                )
+                Issue.record("応答を待ちきれないはず")
+            } catch let error as ControlClientError {
+                #expect(error.exitStatus == ControlClientError.timedOut.exitStatus)
+            }
+        }
+    }
+
+    /// ctl の終了コード（sysexits.h）。自動化が「アプリが無い」と「応答を待ちきれなかった」を分けて扱えるようにする
+    @Test func exitStatusSeparatesTimeoutFromUnavailableApp() {
+        #expect(ControlClientError.connectionFailed("接続が閉じられました").exitStatus == 69)
+        #expect(ControlClientError.timedOut.exitStatus == 75)
+    }
+
     // MARK: Private
 
     /// unix socket のパス長上限（104 バイト）を超えないよう短い一時パスを使う
