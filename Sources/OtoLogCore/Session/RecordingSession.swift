@@ -158,6 +158,14 @@ public actor RecordingSession {
         await close(.stopped, waitingForForwarding: true)
     }
 
+    /// 止めて、閉じ終えるまで待つ。ほかの閉じ方（失敗の片付け、無音での自動停止）が閉じている途中なら、その終わりを待つ。
+    /// アプリの終了で使う。stop() は閉じている途中の呼び出しをすぐ返すため、それを待ってプロセスを終えると閉じ終える前に終わる
+    public func stopAndWaitUntilClosed() async {
+        await stop()
+        guard state == .stopping else { return }
+        await withCheckedContinuation { closeWaiters.append($0) }
+    }
+
     // MARK: Private
 
     /// 起動済みフィードの実行時状態。forwardingTask は再起動で差し替わる
@@ -208,6 +216,8 @@ public actor RecordingSession {
     /// 無音の判定と、それを周期的に確かめる見張り。silenceTimeout を渡した記録の .recording の間だけある
     private var silenceMonitor: SilenceMonitor?
     private var silenceWatchdog: Task<Void, Never>?
+    /// 閉じ終えるのを待っている stopAndWaitUntilClosed。閉じる処理の最後に戻す
+    private var closeWaiters: [CheckedContinuation<Void, Never>] = []
 
     private var canStart: Bool {
         switch state {
@@ -319,6 +329,11 @@ public actor RecordingSession {
                 eventContinuation.yield(.sessionFinished(ref))
             }
             setState(.failed(message))
+        }
+        let waiters = closeWaiters
+        closeWaiters.removeAll()
+        for waiter in waiters {
+            waiter.resume()
         }
     }
 

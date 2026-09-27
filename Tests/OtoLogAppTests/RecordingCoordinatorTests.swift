@@ -121,6 +121,32 @@ import Testing
         await fixture.tearDown()
     }
 
+    // MARK: アプリの終了
+
+    /// 終了では記録を閉じてから戻る。閉じずに終えると、meta.json に終わりが残らず、確定前の末尾の発話も落ちる
+    @Test func 終了では記録を閉じてから戻る() async {
+        let fixture = RecordingCoordinatorFixture()
+        #expect(await fixture.coordinator.controlStart().ok)
+
+        await fixture.coordinator.closeForTermination(timeout: .seconds(5))
+
+        #expect(await fixture.session.state == .idle)
+        await fixture.tearDown()
+    }
+
+    /// 閉じ終わらなくても、上限を過ぎたら戻る。アプリの終了（ログアウトやシャットダウン）をいつまでも止めない
+    @Test func 閉じ終わらなくても上限で戻る() async {
+        let finishing = HeldGate()
+        let fixture = RecordingCoordinatorFixture(finishing: finishing)
+        #expect(await fixture.coordinator.controlStart().ok)
+
+        await fixture.coordinator.closeForTermination(timeout: .milliseconds(200))
+
+        #expect(await fixture.session.state == .stopping)
+        finishing.open()
+        await fixture.tearDown()
+    }
+
     // MARK: 保存先の変更
 
     /// 開いている記録は元の保存先に書き続ける。閉じた記録を扱う処理は設定の保存先で記録を探すため、
