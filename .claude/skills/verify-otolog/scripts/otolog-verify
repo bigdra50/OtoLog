@@ -1,0 +1,526 @@
+#!/usr/bin/env bash
+# OtoLog の検証用インスタンスを組み立て、起動し、操作し、片付ける。
+# 普段使いの OtoLog（com.bigdra50.OtoLog）とは bundle ID・設定・制御ソケット・保存先を分ける。
+# 手順と各サブコマンドの使いどころは ../SKILL.md にある。
+set -euo pipefail
+
+SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+REPO=$(git -C "$SCRIPT_DIR" rev-parse --show-toplevel)
+ROOT="${OTOLOG_VERIFY_ROOT:-${XDG_STATE_HOME:-$HOME/.local/state}/otolog-verify}"
+BUNDLE_ID=com.bigdra50.OtoLog.verify
+APP="$ROOT/app/OtoLogVerify.app"
+EXE="$APP/Contents/MacOS/OtoLog"
+AX="$ROOT/bin/otolog-verify-ax"
+DEVTOOL="$REPO/.build/release/otolog-devtool"
+CURRENT="$ROOT/current"
+VOICE="${OTOLOG_VERIFY_VOICE:-Kyoko}"
+TCC_DB="$HOME/Library/Application Support/com.apple.TCC/TCC.db"
+
+die() {
+    echo "otolog-verify: $*" >&2
+    exit 1
+}
+note() { echo "otolog-verify: $*" >&2; }
+now() { date '+%Y-%m-%dT%H:%M:%S%z'; }
+
+# 検証用バンドルの実行ファイルは、このスクリプトだけが起動する。名前（OtoLog）では普段使いのアプリも当たる
+running_pids() { pgrep -f -x "$EXE" || true; }
+
+json_field() { plutil -extract "$1" raw -o - - 2>/dev/null || true; }
+
+run_dir() {
+    [ -L "$CURRENT" ] || die "動いている run がありません。先に launch"
+    readlink "$CURRENT"
+}
+socket_of() { echo "$1/state/otolog/control.sock"; }
+evidence_dir() { echo "$ROOT/evidence/$(basename "$1")"; }
+ctl_raw() { OTOLOG_CONTROL_SOCKET="$1" "$DEVTOOL" ctl "$2"; }
+
+# 普段使いのインスタンスの状態（読むだけ）。動いていなければ absent
+real_state() {
+    local out
+    if out=$(env -u OTOLOG_CONTROL_SOCKET "$DEVTOOL" ctl status 2>/dev/null); then
+        json_field state <<<"$out"
+    else
+        echo absent
+    fi
+}
+
+# ソースの指紋。バンドルが今のチェックアウトから作られたかを doctor が見分ける
+source_fingerprint() {
+    (
+        cd "$REPO"
+        git rev-parse HEAD
+        git diff HEAD -- Sources Package.swift Package.resolved scripts/make-app.sh
+        git ls-files -z --others --exclude-standard -- Sources | xargs -0 cat 2>/dev/null
+        cat "$SCRIPT_DIR/ax.swift"
+    ) | shasum | cut -c1-12
+}
+
+cdhash_of_app() { codesign -dv --verbose=4 "$APP" 2>&1 | sed -n 's/^CDHash=//p'; }
+
+# TCC.db の「システム音声の録音」の行が、今の検証用バンドルの署名に当たるか。
+# 行の csreq と、バンドルの designated requirement を csreq で固めたものを比べる
+tcc_status() {
+    local row requirement tmp current
+    [ -r "$TCC_DB" ] || {
+        echo unreadable
+        return
+    }
+    row=$(sqlite3 "$TCC_DB" "select auth_value || '|' || hex(csreq) from access where service='kTCCServiceAudioCapture' and client='$BUNDLE_ID';" 2>/dev/null) || {
+        echo unreadable
+        return
+    }
+    [ -n "$row" ] || {
+        echo missing
+        return
+    }
+    [ "${row%%|*}" = 2 ] || {
+        echo "denied(auth_value=${row%%|*})"
+        return
+    }
+    requirement=$(codesign -d -r- "$APP" 2>&1 | sed -n 's/^\(# \)\{0,1\}designated => //p')
+    tmp=$(mktemp)
+    csreq -r="$requirement" -b "$tmp"
+    current=$(xxd -p "$tmp" | tr -d '\n' | tr '[:lower:]' '[:upper:]')
+    rm -f "$tmp"
+    if [ "${row#*|}" = "$current" ]; then echo granted; else echo stale; fi
+}
+
+terminate_pid() {
+    local pid="$1"
+    if [ -x "$AX" ] && "$AX" terminate "$pid" 20; then return 0; fi
+    note "PID $pid が通常の終了で閉じないため SIGTERM を送ります"
+    kill -TERM "$pid" 2>/dev/null || true
+    for _ in $(seq 1 20); do
+        kill -0 "$pid" 2>/dev/null || return 0
+        sleep 0.5
+    done
+    die "PID $pid が終了しません"
+}
+
+log_ctl() {
+    local run="$1" cmd="$2" out code=0
+    out=$(ctl_raw "$(socket_of "$run")" "$cmd" 2>&1) || code=$?
+    echo "$(now) ctl $cmd exit=$code $out" >>"$(evidence_dir "$run")/ctl.log"
+    echo "$out"
+    return "$code"
+}
+
+# 記録が開いていれば ctl stop で閉じてから、通常の終了要求で止める
+stop_app() {
+    local run="$1" pid state
+    for pid in $(running_pids); do
+        state=$(ctl_raw "$(socket_of "$run")" status 2>/dev/null | json_field state)
+        if [ "$state" = preparing ] || [ "$state" = recording ]; then
+            log_ctl "$run" stop || true
+        fi
+        terminate_pid "$pid"
+    done
+}
+
+start_app() {
+    local run="$1" sock out
+    sock=$(socket_of "$run")
+    open -n -g --env XDG_STATE_HOME="$run/state" --env XDG_CONFIG_HOME="$run/config" \
+        -o "$run/app.log" --stderr "$run/app.log" "$APP"
+    # 制御ソケットは起動処理の後に非同期で開く。idle を返すまで待つ
+    for _ in $(seq 1 40); do
+        if out=$(ctl_raw "$sock" status 2>/dev/null) && [ "$(json_field state <<<"$out")" = idle ]; then
+            running_pids | head -1 >"$run/pid"
+            note "ready: pid=$(cat "$run/pid") socket=$sock"
+            return 0
+        fi
+        sleep 0.5
+    done
+    die "20 秒待っても ctl status が idle を返しません（$run/app.log を読み、doctor を実行）"
+}
+
+# recording.log のうち、dir のセッションの開始要求から session finished までの行。
+# 同じ run の前のセッションの行で、開始の経路を取り違えないようにする
+session_block() {
+    local log="$1" dir="$2" end start
+    end=$(grep -nF "session finished: $dir" "$log" | tail -1 | cut -d: -f1)
+    [ -n "$end" ] || return 1
+    start=$(head -n "$end" "$log" | grep -n 'start requested: ' | tail -1 | cut -d: -f1)
+    [ -n "$start" ] || return 1
+    sed -n "${start},${end}p" "$log"
+}
+
+newest_session() {
+    local run="$1" dir at best="" best_at=""
+    while IFS= read -r dir; do
+        at=$(plutil -extract startedAt raw -o - "$dir/meta.json" 2>/dev/null) || continue
+        if [[ "$at" > "$best_at" ]]; then
+            best_at=$at
+            best=$dir
+        fi
+    done < <(find "$run/sessions" -mindepth 2 -maxdepth 2 -type d 2>/dev/null)
+    [ -n "$best" ] || return 1
+    echo "$best"
+}
+
+snapshot() {
+    local run="$1" dest f
+    dest="$(evidence_dir "$run")/snapshot-$2"
+    mkdir -p "$dest"
+    [ ! -d "$run/sessions" ] || cp -R "$run/sessions" "$dest/"
+    for f in "$run/state/otolog/recording.log" "$run/state/otolog/ui.log" "$run/app.log"; do
+        [ ! -f "$f" ] || cp "$f" "$dest/"
+    done
+    defaults read "$BUNDLE_ID" >"$dest/defaults.txt" 2>&1 || true
+    echo "$dest"
+}
+
+print_env() {
+    local run="$1"
+    cat <<EOF
+export OTOLOG_VERIFY_RUN='$run'
+export OTOLOG_VERIFY_SESSIONS='$run/sessions'
+export OTOLOG_VERIFY_LOG='$run/state/otolog/recording.log'
+export OTOLOG_VERIFY_EVIDENCE='$(evidence_dir "$run")'
+export OTOLOG_VERIFY_PID='$(cat "$run/pid" 2>/dev/null || true)'
+export OTOLOG_CONTROL_SOCKET='$(socket_of "$run")'
+EOF
+}
+
+cmd_build() {
+    [ -z "$(running_pids)" ] || die "検証用インスタンスが動いています。先に cleanup"
+    (cd "$REPO" && scripts/make-app.sh && swift build -c release --product otolog-devtool)
+    mkdir -p "$ROOT/app" "$ROOT/bin"
+    rm -rf "$APP"
+    ditto "$REPO/dist/OtoLog.app" "$APP"
+    /usr/libexec/PlistBuddy \
+        -c "Set :CFBundleIdentifier $BUNDLE_ID" \
+        -c "Set :CFBundleName OtoLog Verify" \
+        -c "Set :CFBundleDisplayName OtoLog Verify" \
+        "$APP/Contents/Info.plist"
+    # Info.plist を書き換えた後に署名し直す。書き換える前の署名は無効になっている
+    codesign --force --sign "${OTOLOG_CODESIGN_IDENTITY:--}" "$APP"
+    swiftc -O "$SCRIPT_DIR/ax.swift" -o "$AX"
+    {
+        echo "source=$(source_fingerprint)"
+        echo "git=$(git -C "$REPO" rev-parse --short HEAD)"
+        echo "version=$(defaults read "$APP/Contents/Info.plist" CFBundleVersion)"
+        echo "cdhash=$(cdhash_of_app)"
+        echo "built=$(now)"
+    } >"$ROOT/app/build.txt"
+    cat "$ROOT/app/build.txt"
+}
+
+# launch と relaunch の設定。副作用の前に全部を確かめてから書く
+validate_options() {
+    while [ $# -gt 0 ]; do
+        case "$1" in
+        --silence-minutes | --locale) [ $# -ge 2 ] || die "$1 に値がありません" ;;
+        *) die "unknown option: $1" ;;
+        esac
+        shift 2
+    done
+}
+
+apply_options() {
+    while [ $# -gt 0 ]; do
+        case "$1" in
+        --silence-minutes) defaults write "$BUNDLE_ID" silenceAutoStopMinutes -int "$2" ;;
+        --locale) defaults write "$BUNDLE_ID" localeIdentifier "$2" ;;
+        esac
+        shift 2
+    done
+}
+
+cmd_launch() {
+    local id run sock
+    validate_options "$@"
+    [ -x "$EXE" ] && [ -x "$DEVTOOL" ] && [ -x "$AX" ] || die "未ビルドです。先に build"
+    [ -z "$(running_pids)" ] || die "検証用インスタンスが既に動いています（PID $(running_pids | tr '\n' ' ')）。cleanup してから launch"
+    [ ! -e "$CURRENT" ] || die "前の run が残っています（$(readlink "$CURRENT")）。cleanup してから launch"
+    id=$(date +%d%H%M%S)
+    run="$ROOT/runs/$id"
+    sock=$(socket_of "$run")
+    [ ${#sock} -lt 104 ] || die "ソケットのパスが 104 バイトを超えます: $sock（OTOLOG_VERIFY_ROOT を短くする）"
+    mkdir -p "$run/state" "$run/config" "$run/sessions" "$ROOT/evidence/$id"
+    defaults delete "$BUNDLE_ID" >/dev/null 2>&1 || true
+    defaults write "$BUNDLE_ID" saveDirectoryPath "$run/sessions"
+    defaults write "$BUNDLE_ID" localeIdentifier ja-JP
+    defaults write "$BUNDLE_ID" audioInputMode system
+    defaults write "$BUNDLE_ID" postStopAction none
+    defaults write "$BUNDLE_ID" translationEnabled -bool false
+    apply_options "$@"
+    ln -sfn "$run" "$CURRENT"
+    start_app "$run"
+    {
+        echo "run=$id"
+        cat "$ROOT/app/build.txt"
+        echo "launched=$(now)"
+        defaults read "$BUNDLE_ID"
+    } >"$ROOT/evidence/$id/run.txt"
+    print_env "$run"
+}
+
+cmd_relaunch() {
+    local run
+    validate_options "$@"
+    run=$(run_dir)
+    stop_app "$run"
+    # 設定はアプリの起動時に一度だけ読まれる。止めている間に書く
+    apply_options "$@"
+    start_app "$run"
+}
+
+# check は常に 0 を返すので、`A && check OK || check NG` の両方が出ることはない
+# shellcheck disable=SC2015
+cmd_doctor() {
+    local fails=0 run="" pids pid out state tcc perms built
+    check() {
+        printf '%-4s %s\n' "$1" "$2"
+        [ "$1" != NG ] || fails=$((fails + 1))
+    }
+    if [ -x "$EXE" ] && [ -f "$ROOT/app/build.txt" ]; then
+        built=$(sed -n 's/^source=//p' "$ROOT/app/build.txt")
+        if [ "$built" = "$(source_fingerprint)" ]; then
+            check OK "bundle: $(tr '\n' ' ' <"$ROOT/app/build.txt")"
+        else
+            check WARN "bundle: 今のチェックアウトより古いビルドです（build し直す）: $(tr '\n' ' ' <"$ROOT/app/build.txt")"
+        fi
+        [ "$(defaults read "$APP/Contents/Info.plist" CFBundleIdentifier)" = "$BUNDLE_ID" ] &&
+            check OK "bundle id: $BUNDLE_ID" || check NG "bundle id が $BUNDLE_ID ではありません"
+    else
+        check NG "bundle: 未ビルドです（build）"
+    fi
+    [ -x "$DEVTOOL" ] && check OK "devtool: $DEVTOOL" || check NG "devtool: 未ビルドです（build）"
+    if [ -L "$CURRENT" ]; then
+        run=$(readlink "$CURRENT")
+        check OK "run: $(basename "$run") ($run)"
+    else
+        check NG "run: ありません（launch）"
+    fi
+    pids=$(running_pids | tr '\n' ' ')
+    pids=${pids% }
+    if [ -n "$run" ] && [ -n "$pids" ] && [ "$pids" = "$(cat "$run/pid" 2>/dev/null)" ]; then
+        pid=$pids
+        check OK "process: pid=$pid ($EXE)"
+        if ps -E -p "$pid" -o command= | tr ' ' '\n' | grep -qx "XDG_STATE_HOME=$run/state"; then
+            check OK "env: XDG_STATE_HOME=$run/state"
+        else
+            check NG "env: XDG_STATE_HOME が run の state を指していません"
+        fi
+    elif [ -z "$pids" ]; then
+        check NG "process: 検証用インスタンスが動いていません（launch か relaunch）"
+    else
+        check NG "process: run の pid と一致しないインスタンスがあります（${pids}）。cleanup"
+    fi
+    if [ -n "$run" ] && out=$(ctl_raw "$(socket_of "$run")" status 2>&1); then
+        check OK "ctl: $out"
+    else
+        check NG "ctl: 応答がありません（${out:-run なし}）"
+    fi
+    if [ -n "$run" ]; then
+        [ "$(defaults read "$BUNDLE_ID" saveDirectoryPath 2>/dev/null)" = "$run/sessions" ] &&
+            check OK "save dir: $run/sessions" || check NG "save dir: 設定の保存先が run を指していません"
+    fi
+    state=$(real_state)
+    case "$state" in
+    preparing | recording) check WARN "real OtoLog: $state（say を流すと普段使いの記録に入る。終わるまで待つ）" ;;
+    *) check OK "real OtoLog: $state" ;;
+    esac
+    tcc=$(tcc_status)
+    case "$tcc" in
+    granted) check OK "tcc: このビルドにシステム音声の録音の許可があります" ;;
+    missing) check WARN "tcc: 許可がまだありません（最初の ctl start でダイアログが出る。人が許可したら relaunch）" ;;
+    stale) check WARN "tcc: 許可は前のビルドのものです（ctl start でダイアログが出る。人が許可したら relaunch）" ;;
+    unreadable) check WARN "tcc: TCC.db を読めません（このターミナルにフルディスクアクセスが無い）" ;;
+    *) check WARN "tcc: $tcc（システム設定で OtoLog Verify を許可してから relaunch）" ;;
+    esac
+    if [ -x "$AX" ]; then
+        perms=$("$AX" perms | tr '\n' ' ')
+        case "$perms" in
+        *false*) check WARN "terminal perms: $perms（AX 操作かスクリーンショットが使えない）" ;;
+        *) check OK "terminal perms: $perms" ;;
+        esac
+    fi
+    say -v '?' | grep -q "^$VOICE " && check OK "voice: $VOICE" || check WARN "voice: $VOICE がありません（OTOLOG_VERIFY_VOICE で変える）"
+    [ "$fails" -eq 0 ]
+}
+
+cmd_ctl() {
+    [ $# -eq 1 ] || die "usage: ctl <status|start|stop>"
+    log_ctl "$(run_dir)" "$1"
+}
+
+cmd_say() {
+    [ $# -ge 1 ] || die "usage: say <text>"
+    local run state
+    run=$(run_dir)
+    state=$(real_state)
+    case "$state" in
+    preparing | recording) die "普段使いの OtoLog が記録中（$state）です。音声がそちらの記録に入るため流しません" ;;
+    esac
+    # 記録を始めた直後の約 2 秒は取りこぼすことがある（README の既知の制約）。ctl start の直後に呼ばれても届くよう待つ
+    sleep 2
+    echo "$(now) say voice=$VOICE text=$*" >>"$(evidence_dir "$run")/actions.log"
+    say -v "$VOICE" "$*"
+}
+
+cmd_wait_segment() {
+    local timeout="${1:-30}" run dir deadline
+    run=$(run_dir)
+    deadline=$((SECONDS + timeout))
+    while [ "$SECONDS" -lt "$deadline" ]; do
+        if dir=$(newest_session "$run") && [ -s "$dir/transcript.jsonl" ]; then
+            cat "$dir/transcript.jsonl"
+            return 0
+        fi
+        sleep 1
+    done
+    die "${timeout} 秒待っても確定セグメントがありません（doctor の tcc 行を確認。許可が無いと recording のまま無音になる）"
+}
+
+cmd_session() {
+    newest_session "$(run_dir)" || die "セッションがまだありません"
+}
+
+# result は常に 0 を返すので、`A && result PASS || result FAIL` の両方が出ることはない
+# shellcheck disable=SC2015
+cmd_check_session() {
+    local reason=stopped min=1 via="" run dir log fails=0 value count japanese
+    while [ $# -gt 0 ]; do
+        case "$1" in
+        --end-reason)
+            reason="$2"
+            shift 2
+            ;;
+        --min-segments)
+            min="$2"
+            shift 2
+            ;;
+        --via)
+            via="$2"
+            shift 2
+            ;;
+        *) die "unknown option: $1" ;;
+        esac
+    done
+    run=$(run_dir)
+    dir=$(newest_session "$run") || die "セッションがまだありません"
+    log="$run/state/otolog/recording.log"
+    result() {
+        printf '%-4s %s\n' "$1" "$2"
+        [ "$1" = PASS ] || fails=$((fails + 1))
+    }
+    echo "session: $dir"
+    value=$(plutil -extract endReason raw -o - "$dir/meta.json" 2>/dev/null || true)
+    [ "$value" = "$reason" ] && result PASS "meta.json endReason=$value" || result FAIL "meta.json endReason=${value:-なし}（期待 $reason）"
+    value=$(plutil -extract endedAt raw -o - "$dir/meta.json" 2>/dev/null || true)
+    [ -n "$value" ] && result PASS "meta.json endedAt=$value" || result FAIL "meta.json に endedAt がありません"
+    count=0
+    [ ! -f "$dir/transcript.jsonl" ] || count=$(wc -l <"$dir/transcript.jsonl" | tr -d ' ')
+    [ "$count" -ge "$min" ] && result PASS "transcript.jsonl lines=$count" || result FAIL "transcript.jsonl lines=$count（期待 $min 以上）"
+    if [ "$min" -gt 0 ] && [ "$count" -gt 0 ]; then
+        japanese=0
+        while IFS= read -r line; do
+            plutil -extract text raw -o - - <<<"$line" 2>/dev/null |
+                perl -CSD -ne '$f = 1 if /[\p{Han}\p{Hiragana}\p{Katakana}]/; END { exit($f ? 0 : 1) }' && japanese=1
+        done <"$dir/transcript.jsonl"
+        [ "$japanese" -eq 1 ] && result PASS "transcript.jsonl に日本語の text があります" || result FAIL "transcript.jsonl の text に日本語がありません"
+        [ -s "$dir/transcript.md" ] && result PASS "transcript.md があります" || result FAIL "transcript.md がありません"
+    fi
+    if [ -n "$via" ]; then
+        session_block "$log" "$dir" | grep -q "start requested: via=$via " &&
+            result PASS "recording.log: このセッションの start requested via=$via" ||
+            result FAIL "recording.log のこのセッションの区間に start requested via=$via がありません"
+    fi
+    grep -qF "session finished: $dir" "$log" && result PASS "recording.log: session finished: $dir" || result FAIL "recording.log に session finished: $dir がありません"
+    [ "$(tail -1 "$log" | sed 's/^[^ ]* //')" = "[INFO] state: idle" ] && result PASS "recording.log: 最後の行が state: idle" || result FAIL "recording.log の最後の行が state: idle ではありません"
+    [ "$fails" -eq 0 ]
+}
+
+cmd_ax() {
+    [ $# -ge 1 ] || die "usage: ax <tree|press <label>|select <text>|popover <open|close>|status-item|wait <label> [秒]|wait-gone <label> [秒]|windows|terminate [秒]>"
+    local sub="$1"
+    shift
+    "$AX" "$sub" "$(cat "$(run_dir)/pid")" "$@"
+}
+
+cmd_shot() {
+    [ $# -eq 1 ] || die "usage: shot <name>"
+    local run ev pid wid n=0
+    run=$(run_dir)
+    ev=$(evidence_dir "$run")
+    pid=$(cat "$run/pid")
+    "$AX" tree "$pid" >"$ev/$1.ax.txt"
+    while IFS=$'\t' read -r wid _; do
+        screencapture -x -o -l "$wid" "$ev/$1-$wid.png"
+        n=$((n + 1))
+    done < <("$AX" windows "$pid")
+    [ "$n" -gt 0 ] || note "画面上にウィンドウがありません（AX ツリーだけ保存）"
+    printf '%s\n' "$ev/$1".ax.txt "$ev/$1"-*.png 2>/dev/null | grep -v '\*' || true
+}
+
+cmd_evidence() { snapshot "$(run_dir)" "${1:-$(date +%H%M%S)}"; }
+
+cmd_env() { print_env "$(run_dir)"; }
+
+cmd_cleanup() {
+    local run="" pid
+    [ ! -L "$CURRENT" ] || run=$(readlink "$CURRENT")
+    if [ -n "$run" ] && [ -d "$run" ]; then
+        stop_app "$run"
+        snapshot "$run" final >/dev/null
+    fi
+    # run と結び付かない取り残し（前の run が途中で終わったもの）も止める
+    for pid in $(running_pids); do terminate_pid "$pid"; done
+    [ -z "$run" ] || rm -rf "$run"
+    rm -f "$CURRENT"
+    defaults delete "$BUNDLE_ID" >/dev/null 2>&1 || true
+    [ -z "$run" ] || echo "evidence: $(evidence_dir "$run")"
+}
+
+usage() {
+    cat <<'EOF'
+usage: otolog-verify <command> [args]
+  build                                   アプリと devtool をビルドし、検証用バンドルを組み立てる
+  launch [--silence-minutes N] [--locale ID]  run を作って検証用インスタンスを起動する
+  doctor                                  このインスタンスを操作してよいかを読むだけで確かめる
+  ctl <status|start|stop>                 制御ソケットで操作し、応答を evidence/ctl.log に残す
+  say <text>                              システム音声で読み上げる（普段使いの OtoLog が記録中なら断る）
+  wait-segment [秒]                       最新セッションに確定セグメントが書かれるまで待つ（既定 30 秒）
+  session                                 最新セッションのディレクトリを出す
+  check-session [--end-reason R] [--min-segments N] [--via control|popover]
+  ax <tree|press <label>|select <text>|popover <open|close>|status-item|wait <label> [秒]|wait-gone <label> [秒]|windows|terminate [秒]>
+                                          検証用インスタンスを PID 指定の Accessibility で操作する
+  shot <name>                             AX ツリーとウィンドウのスクリーンショットを evidence に保存する
+  evidence [label]                        セッション・ログ・設定を evidence/snapshot-<label> にコピーする
+  relaunch [--silence-minutes N] [--locale ID]  同じ run のまま再起動する（TCC の許可や設定を反映させる）
+  env                                     run のパスを export 文で出す
+  cleanup                                 インスタンスと run を消す（evidence は残す）
+EOF
+}
+
+[ $# -ge 1 ] || {
+    usage
+    exit 64
+}
+command=$1
+shift
+case "$command" in
+build) cmd_build "$@" ;;
+launch) cmd_launch "$@" ;;
+doctor) cmd_doctor "$@" ;;
+ctl) cmd_ctl "$@" ;;
+say) cmd_say "$@" ;;
+wait-segment) cmd_wait_segment "$@" ;;
+session) cmd_session "$@" ;;
+check-session) cmd_check_session "$@" ;;
+ax) cmd_ax "$@" ;;
+shot) cmd_shot "$@" ;;
+evidence) cmd_evidence "$@" ;;
+relaunch) cmd_relaunch "$@" ;;
+env) cmd_env "$@" ;;
+cleanup) cmd_cleanup "$@" ;;
+-h | --help | help) usage ;;
+*)
+    usage
+    exit 64
+    ;;
+esac
