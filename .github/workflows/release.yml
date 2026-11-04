@@ -16,7 +16,7 @@ jobs:
     # macos-26 が使えない場合は runs-on を macos-15 にし、maxim-lobanov/setup-xcode で 26 系を指定する。
     runs-on: macos-26
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 0 # make-app.sh のビルド番号（git rev-list --count）に全履歴が要る
 
@@ -38,14 +38,14 @@ jobs:
         id: sha
         run: echo "sha256=$(shasum -a 256 dist/OtoLog.zip | awk '{print $1}')" >> "$GITHUB_OUTPUT"
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: OtoLog-zip
           path: dist/OtoLog.zip
 
       - name: Create Release
         if: github.ref_type == 'tag'
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
           files: dist/OtoLog.zip
           generate_release_notes: true
